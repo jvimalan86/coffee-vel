@@ -141,6 +141,7 @@ const db = {
   updateTransfer:  (id,d)=> sb("PATCH","cv_stock_transfers",{body:d,q:`?id=eq.${id}`}),
   getTransferSeq:  ()    => sb("GET","cv_transfer_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
   incTransferSeq:  (n)   => sb("PATCH","cv_transfer_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+  getHullingJobs: ()    => sb("GET","cv_hulling_jobs",{q:"?select=*&order=created_at.desc"}),
   addHullingJob:  (d)   => sb("POST","cv_hulling_jobs",{body:d}),
   deleteHullingJob:(id) => sb("DELETE","cv_hulling_jobs",{q:`?id=eq.${id}`}),
   getHullingSeq:  ()    => sb("GET","cv_hulling_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
