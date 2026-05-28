@@ -135,8 +135,12 @@ const db = {
   getStorageReleases: ()     => sb("GET","cv_storage_releases",{q:"?select=*&order=created_at.desc"}),
   addStorageRelease:  (d)    => sb("POST","cv_storage_releases",{body:d}),
 
-  // HULLING
-  getHullingJobs: ()    => sb("GET","cv_hulling_jobs",{q:"?select=*&order=created_at.desc"}),
+  // STOCK TRANSFERS
+  getTransfers:    ()    => sb("GET","cv_stock_transfers",{q:"?select=*&order=created_at.desc"}),
+  addTransfer:     (d)   => sb("POST","cv_stock_transfers",{body:d}),
+  updateTransfer:  (id,d)=> sb("PATCH","cv_stock_transfers",{body:d,q:`?id=eq.${id}`}),
+  getTransferSeq:  ()    => sb("GET","cv_transfer_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incTransferSeq:  (n)   => sb("PATCH","cv_transfer_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
   addHullingJob:  (d)   => sb("POST","cv_hulling_jobs",{body:d}),
   deleteHullingJob:(id) => sb("DELETE","cv_hulling_jobs",{q:`?id=eq.${id}`}),
   getHullingSeq:  ()    => sb("GET","cv_hulling_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
@@ -179,9 +183,10 @@ const VOUCHER_TYPES = [
 ];
 
 const ROLES = {
-  admin:      { label:"Admin",      canDelete:true,  canPost:true,  canViewReports:true  },
-  accountant: { label:"Accountant", canDelete:false, canPost:true,  canViewReports:true  },
-  viewer:     { label:"View Only",  canDelete:false, canPost:false, canViewReports:true  },
+  admin:      { label:"Admin",           canDelete:true,  canPost:true,  canViewReports:true,  isBranch:false },
+  accountant: { label:"Accountant",      canDelete:false, canPost:true,  canViewReports:true,  isBranch:false },
+  viewer:     { label:"View Only",       canDelete:false, canPost:false, canViewReports:true,  isBranch:false },
+  branch:     { label:"Branch (Yercaud)",canDelete:false, canPost:true,  canViewReports:false, isBranch:true  },
 };
 
 // ── DESIGN ────────────────────────────────────────────────────────
@@ -1250,7 +1255,7 @@ function TrialBalance({ state }) {
 
 // ── USER MANAGEMENT ───────────────────────────────────────────────
 function UserManagement({ state, dispatch, currentUser }) {
-  const [form,setForm]=useState({username:"",password:"",name:"",role:"accountant"});
+  const [form,setForm]=useState({username:"",password:"",name:"",role:"accountant",location:"hq",branchName:"Head Office"});
   const [editId,setEditId]=useState(null);
   const [editForm,setEditForm]=useState(null);
   const [userError,setUserError]=useState("");
@@ -1278,12 +1283,18 @@ function UserManagement({ state, dispatch, currentUser }) {
           <Field label="Username"><input value={form.username} onChange={e=>setForm(f=>({...f,username:e.target.value}))} placeholder="e.g. rajan" style={sh.input}/></Field>
           <Field label="Password"><input type="password" value={form.password} onChange={e=>setForm(f=>({...f,password:e.target.value}))} placeholder="••••••" style={sh.input}/></Field>
           <Field label="Role">
-            <select value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))} style={sh.input}>
+            <select value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value,location:e.target.value==="branch"?"yercaud":"hq",branchName:e.target.value==="branch"?"Yercaud":"Head Office"}))} style={sh.input}>
               <option value="admin">Admin (Full Access)</option>
               <option value="accountant">Accountant (No Delete)</option>
               <option value="viewer">View Only</option>
+              <option value="branch">Branch — Yercaud</option>
             </select>
           </Field>
+          {form.role==="branch"&&(
+            <Field label="Branch Name">
+              <input value={form.branchName} onChange={e=>setForm(f=>({...f,branchName:e.target.value}))} placeholder="e.g. Yercaud" style={sh.input}/>
+            </Field>
+          )}
         </div>
         <div style={{marginTop:14,display:"flex",alignItems:"center",gap:12}}>
           <Btn onClick={add} variant="success">+ Add User</Btn>
@@ -1298,7 +1309,7 @@ function UserManagement({ state, dispatch, currentUser }) {
             <Field label="New Password"><input type="password" value={editForm.password} onChange={e=>setEditForm(f=>({...f,password:e.target.value}))} style={sh.input}/></Field>
             <Field label="Role">
               <select value={editForm.role} onChange={e=>setEditForm(f=>({...f,role:e.target.value}))} style={sh.input}>
-                <option value="admin">Admin</option><option value="accountant">Accountant</option><option value="viewer">View Only</option>
+                <option value="admin">Admin</option><option value="accountant">Accountant</option><option value="viewer">View Only</option><option value="branch">Branch — Yercaud</option>
               </select>
             </Field>
             <div style={{display:"flex",gap:8,marginTop:4}}><Btn onClick={saveEdit} variant="success">✓ Save</Btn><Btn onClick={()=>{setEditId(null);setEditForm(null);}} variant="ghost">Cancel</Btn></div>
@@ -3297,20 +3308,204 @@ function SalesModule({ state, dispatch, role }) {
   );
 }
 
+// ── STOCK TRANSFER MODULE ─────────────────────────────────────────
+function StockTransferModule({ state, dispatch, role, currentUser }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm]         = useState({date:today(),grnId:"",qty:"",bags:"",narration:""});
+  const [err, setErr]           = useState("");
+  const isBranch   = role==="branch";
+  const userLoc    = currentUser?.location||"hq";
+  const canPost    = ROLES[role]?.canPost;
+  const canDelete  = ROLES[role]?.canDelete;
+  const set = (f,v) => setForm(p=>({...p,[f]:v}));
+
+  // Branch sees GRNs from their location not yet transferred
+  const transferredGrnIds = new Set((state.transfers||[]).map(t=>t.grnId));
+  const eligibleGRNs = state.grns.filter(g => {
+    if (isBranch && (g.location||"hq")!==userLoc) return false;
+    if (transferredGrnIds.has(g.id)) return false;
+    return true;
+  });
+
+  const selectedGRN   = state.grns.find(g=>g.id===form.grnId);
+  const maxQty        = selectedGRN ? parseFloat(selectedGRN.dryKg||selectedGRN.netWeight||0) : 0;
+
+  const submit = () => {
+    if (!form.grnId)               { setErr("Select a GRN"); return; }
+    if (!form.qty||parseFloat(form.qty)<=0){ setErr("Enter transfer weight (kg)"); return; }
+    if (parseFloat(form.qty)>maxQty+0.5){ setErr(`Only ${maxQty} kg available`); return; }
+    setErr("");
+    dispatch({type:"ADD_TRANSFER",data:{
+      date:form.date,
+      grnId:form.grnId,
+      fromLocation:userLoc,
+      toLocation:"hq",
+      coffeeType:selectedGRN?.outputType||selectedGRN?.coffeeType,
+      weightKg:parseFloat(form.qty),
+      bags:parseInt(form.bags||0),
+      narration:form.narration,
+      raisedBy:currentUser?.name,
+    }});
+    setShowForm(false);
+    setForm({date:today(),grnId:"",qty:"",bags:"",narration:""});
+  };
+
+  const pending  = (state.transfers||[]).filter(t=>t.status==="pending");
+  const accepted = (state.transfers||[]).filter(t=>t.status==="accepted");
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>🚛 Stock Transfer</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>
+            {isBranch?"Yercaud → Pattiveeranpatti":"Receive stock from Yercaud branch"}
+          </p>
+        </div>
+        {isBranch&&canPost&&<Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ Raise Transfer</Btn>}
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        {[
+          {icon:"⏳",label:"Pending",    value:pending.length,  color:"#d97706"},
+          {icon:"✅",label:"Accepted",   value:accepted.length, color:C.green},
+          {icon:"📦",label:"Total kg",   value:(state.transfers||[]).reduce((s,t)=>s+parseFloat(t.weightKg||0),0).toLocaleString("en-IN",{maximumFractionDigits:0})+" kg"},
+        ].map(s=>(
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:120}}>
+            <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>{s.label}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:s.color||C.accent,marginTop:4}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* New transfer form */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>🚛 Raise Stock Transfer — Yercaud → HQ</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12,marginBottom:14}}>
+            <Field label="Date"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
+            <Field label="Select GRN *">
+              <select value={form.grnId} onChange={e=>set("grnId",e.target.value)} style={{...sh.input,borderColor:!form.grnId?"#f97316":C.border}}>
+                <option value="">— Select GRN —</option>
+                {eligibleGRNs.map(g=>{
+                  const party=state.parties[g.partyId];
+                  const qty=parseFloat(g.dryKg||g.netWeight||0);
+                  return <option key={g.id} value={g.id}>{g.id} · {party?.name||"?"} · {g.coffeeType} · {qty}kg</option>;
+                })}
+              </select>
+            </Field>
+            <Field label={`Weight kg (max ${maxQty} kg)`}>
+              <input type="number" value={form.qty} onChange={e=>set("qty",e.target.value)} placeholder="0" style={sh.input}/>
+            </Field>
+            <Field label="No of bags">
+              <input type="number" value={form.bags} onChange={e=>set("bags",e.target.value)} placeholder="0" style={sh.input}/>
+            </Field>
+            <Field label="Narration">
+              <input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Vehicle no, driver..." style={sh.input}/>
+            </Field>
+          </div>
+          {selectedGRN&&(
+            <div style={{padding:"10px 14px",background:"#f0fdf4",borderRadius:6,marginBottom:12,fontSize:12}}>
+              <strong>{selectedGRN.id}</strong> · {selectedGRN.coffeeType} · {state.parties[selectedGRN.partyId]?.name} · {maxQty} kg available
+            </div>
+          )}
+          {err&&<div style={{color:C.red,fontWeight:700,fontSize:13,padding:"8px 12px",background:"#fee2e2",borderRadius:6,marginBottom:10}}>{err}</div>}
+          <div style={{display:"flex",gap:10}}>
+            <Btn onClick={submit} variant="success">✓ Raise Transfer</Btn>
+            <Btn onClick={()=>{setShowForm(false);setErr("");}} variant="ghost">Cancel</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* Pending transfers — HQ can accept */}
+      {pending.length>0&&(
+        <div>
+          <div style={{fontWeight:800,color:"#d97706",marginBottom:10,fontSize:15}}>⏳ Pending Acceptance</div>
+          {pending.map(t=>{
+            const grn=state.grns.find(g=>g.id===t.grnId);
+            const party=state.parties[grn?.partyId];
+            return(
+              <div key={t.id} style={{...sh.card,border:"2px solid #fde68a",marginBottom:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}}>
+                  <div>
+                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:6}}>
+                      <span style={{background:"#fef3c7",color:"#92400e",padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{t.id}</span>
+                      <span style={{fontSize:13,color:C.muted}}>{t.date}</span>
+                      <span style={{fontWeight:700}}>{party?.name||"?"}</span>
+                      <span style={{fontSize:12,color:C.muted}}>{t.coffeeType}</span>
+                      <span style={{fontSize:11,color:C.muted}}>from {t.fromLocation}</span>
+                    </div>
+                    <div style={{fontSize:13}}>
+                      <strong>{parseFloat(t.weightKg||0).toLocaleString("en-IN")} kg</strong>
+                      {t.bags>0&&<span style={{color:C.muted,marginLeft:8}}>{t.bags} bags</span>}
+                      {t.narration&&<span style={{color:C.muted,marginLeft:8,fontStyle:"italic"}}>{t.narration}</span>}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:4}}>Raised by: {t.raisedBy} · GRN: {t.grnId}</div>
+                  </div>
+                  {!isBranch&&(
+                    <Btn variant="success" onClick={()=>dispatch({type:"ACCEPT_TRANSFER",id:t.id,acceptedBy:currentUser?.name})}>
+                      ✓ Accept Stock
+                    </Btn>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Accepted transfers */}
+      {accepted.length>0&&(
+        <div>
+          <div style={{fontWeight:800,color:C.green,marginBottom:10,fontSize:15}}>✅ Accepted Transfers</div>
+          {accepted.map(t=>{
+            const grn=state.grns.find(g=>g.id===t.grnId);
+            const party=state.parties[grn?.partyId];
+            return(
+              <div key={t.id} style={{...sh.card,borderLeft:`3px solid ${C.green}`,marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                    <span style={{background:"#dcfce7",color:C.green,padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{t.id}</span>
+                    <span style={{fontSize:13,color:C.muted}}>{t.date}</span>
+                    <span style={{fontWeight:700}}>{party?.name||"?"}</span>
+                    <span style={{fontSize:12,background:"#f0fdf4",color:C.green,padding:"2px 8px",borderRadius:4}}>{t.coffeeType}</span>
+                    <span style={{fontFamily:"monospace",fontWeight:700}}>{parseFloat(t.weightKg||0).toLocaleString("en-IN")} kg</span>
+                  </div>
+                  <div style={{fontSize:11,color:C.muted}}>Accepted by {t.acceptedBy}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {(state.transfers||[]).length===0&&(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:40,marginBottom:8}}>🚛</div>
+          {isBranch?"No transfers raised yet. Click + Raise Transfer to begin.":"No transfers received from branch yet."}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── APP ───────────────────────────────────────────────────────────
 const NAV=[
   {id:"dashboard", label:"Dashboard",    icon:"🏠"},
   {id:"grn",       label:"Purchase GRN", icon:"📋"},
-  {id:"hulling",   label:"Hulling",      icon:"⚙️"},
-  {id:"sales",     label:"Sales",        icon:"🏷"},
-  {id:"storage",   label:"Party Storage",icon:"🏭"},
-  {id:"daybook",   label:"Day Book",     icon:"📓"},
-  {id:"ledger",    label:"Ledger",       icon:"📒"},
+  {id:"transfer",  label:"Stock Transfer",icon:"🚛", branchVisible:true},
+  {id:"hulling",   label:"Hulling",      icon:"⚙️",  branchHidden:true},
+  {id:"sales",     label:"Sales",        icon:"🏷",   branchHidden:true},
+  {id:"storage",   label:"Party Storage",icon:"🏭",   branchHidden:true},
+  {id:"daybook",   label:"Day Book",     icon:"📓",   branchHidden:true},
+  {id:"ledger",    label:"Ledger",       icon:"📒",   branchHidden:true},
   {id:"pl",        label:"Profit & Loss",icon:"📈", adminOnly:true},
-  {id:"trial",     label:"Trial Balance",icon:"⚖️"},
+  {id:"trial",     label:"Trial Balance",icon:"⚖️",   branchHidden:true},
   {id:"stock",     label:"Stock",        icon:"☕"},
   {id:"parties",   label:"Parties",      icon:"👥"},
-  {id:"accounts",  label:"Accounts",     icon:"🗂"},
+  {id:"accounts",  label:"Accounts",     icon:"🗂",   branchHidden:true},
   {id:"masters",   label:"Masters",      icon:"🗂️", adminOnly:true},
   {id:"users",     label:"Users",        icon:"👤", adminOnly:true},
 ];
@@ -3337,6 +3532,7 @@ export default function App() {
   const [storageReleases, setStorageReleases] = useState([]);
   const [hullingJobs,  setHullingJobs]  = useState([]);
   const [sales,        setSales]        = useState([]);
+  const [transfers,    setTransfers]    = useState([]);
 
   // Compute stock from vouchers (no separate stock table needed)
   const stock = useMemo(() => {
@@ -3419,11 +3615,11 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      const [accs, parts, vouchs, sitems, grnList, userList, whs, locs, ctypes, dryList, storList, relList, hullList, salesList] = await Promise.all([
+      const [accs, parts, vouchs, sitems, grnList, userList, whs, locs, ctypes, dryList, storList, relList, hullList, salesList, transferList] = await Promise.all([
         db.getAccounts(), db.getParties(), db.getVouchers(), db.getStockItems(),
         db.getGRNs(), db.getUsers(), db.getWarehouses(), db.getLocations(),
         db.getCoffeeTypes(), db.getDryingJobs(), db.getStorageLots(),
-        db.getStorageReleases(), db.getHullingJobs(), db.getSales(),
+        db.getStorageReleases(), db.getHullingJobs(), db.getSales(), db.getTransfers(),
       ]);
       // Columns are now camelCase in DB after migration
       const accsObj = {};
@@ -3459,6 +3655,7 @@ export default function App() {
       setStorageReleases(relList||[]);
       setHullingJobs(hullList||[]);
       setSales(salesList||[]);
+      setTransfers(transferList||[]);
     } catch(e) {
       setError("Failed to load data: " + e.message);
     }
@@ -3491,7 +3688,7 @@ export default function App() {
   const state = {
     accounts: accurateAccounts, parties, vouchers, stockItems, grns, users, stock,
     warehouses, locations, coffeeTypes, dryingJobs, storageLots, storageReleases,
-    hullingJobs, sales,
+    hullingJobs, sales, transfers,
     nextVoucherNo:{RV:1,PV:1,CV:1,JV:1,SV:1,PuV:1},
     nextId:1, nextGRN:1,
   };
@@ -3630,6 +3827,23 @@ export default function App() {
           break;
         }
         case "DELETE_SALE": await db.deleteSale(action.id); break;
+
+        // ── STOCK TRANSFERS ──────────────────────────────────────
+        case "ADD_TRANSFER": {
+          const seq = await db.getTransferSeq();
+          const id = `TRF-${String(seq).padStart(4,"0")}`;
+          await db.incTransferSeq(seq);
+          await db.addTransfer({ id, ...action.data, status:"pending" });
+          break;
+        }
+        case "ACCEPT_TRANSFER": {
+          await db.updateTransfer(action.id, {
+            status:"accepted",
+            acceptedBy: action.acceptedBy,
+            acceptedAt: new Date().toISOString(),
+          });
+          break;
+        }
 
         // ── ACCOUNTS ───────────────────────────────────────────
         case "ADD_ACCOUNT": {
@@ -3930,19 +4144,54 @@ export default function App() {
     </div>
   );
 
-  const role = currentUser.role;
-  const visibleNav = NAV.filter(n=>!n.adminOnly||role==="admin");
+  const role       = currentUser.role;
+  const isBranch   = role === "branch";
+  const userLoc    = currentUser.location || "hq";
+  const visibleNav = NAV.filter(n => {
+    if (n.adminOnly && role !== "admin") return false;
+    if (n.branchHidden && isBranch) return false;
+    return true;
+  });
 
   return(
-    <div style={{minHeight:"100vh",background:C.bg,display:"flex",fontFamily:"'Lora',Georgia,serif"}}>
-      <div style={{width:215,background:C.accent,display:"flex",flexDirection:"column",flexShrink:0,position:"sticky",top:0,height:"100vh"}}>
-        <div style={{padding:"20px 20px 16px",borderBottom:"1px solid #ffffff22"}}>
-          <div style={{fontSize:17,fontWeight:800,color:"#fff"}}>☕ Coffee Vel</div>
+    <div style={{minHeight:"100vh",background:C.bg,fontFamily:"'Lora',Georgia,serif"}}>
+      <style>{`
+        .cv-layout{display:flex;min-height:100vh;}
+        .cv-sidebar{width:215px;background:${C.accent};display:flex;flex-direction:column;flex-shrink:0;position:sticky;top:0;height:100vh;z-index:50;}
+        .cv-topbar{display:none;background:${C.accent};padding:10px 16px;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}
+        .cv-main{flex:1;padding:24px 28px;overflow-y:auto;min-width:0;}
+        @media(max-width:768px){
+          .cv-layout{flex-direction:column;}
+          .cv-sidebar{position:fixed;top:0;left:-220px;height:100vh;width:220px;transition:left 0.25s;box-shadow:4px 0 20px #00000033;}
+          .cv-sidebar.open{left:0;}
+          .cv-topbar{display:flex;}
+          .cv-main{padding:16px;margin-top:0;}
+          .cv-overlay{display:none;position:fixed;inset:0;background:#00000044;z-index:49;}
+          .cv-overlay.open{display:block;}
+        }
+      `}</style>
+      {/* Mobile top bar */}
+      <div className="cv-topbar">
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:18,fontWeight:800,color:"#fff"}}>☕</span>
+          <span style={{fontSize:15,fontWeight:800,color:"#fff"}}>Coffee Vel</span>
+          {isBranch&&<span style={{fontSize:11,background:"#ffffff33",color:"#fff",padding:"2px 8px",borderRadius:10,fontWeight:700}}>🌿 {currentUser.branchName||"Branch"}</span>}
+        </div>
+        <button onClick={()=>{document.getElementById("cv-sb").classList.toggle("open");document.getElementById("cv-ov").classList.toggle("open");}} style={{background:"none",border:"none",color:"#fff",fontSize:24,cursor:"pointer",lineHeight:1}}>☰</button>
+      </div>
+      {/* Overlay for mobile */}
+      <div id="cv-ov" className="cv-overlay" onClick={()=>{document.getElementById("cv-sb").classList.remove("open");document.getElementById("cv-ov").classList.remove("open");}}/>
+      <div className="cv-layout">
+      {/* Sidebar */}
+      <div id="cv-sb" className="cv-sidebar">
+        <div style={{padding:"18px 16px 14px",borderBottom:"1px solid #ffffff22"}}>
+          <div style={{fontSize:16,fontWeight:800,color:"#fff"}}>☕ Coffee Vel</div>
           <div style={{fontSize:10,color:"#ffffff88",marginTop:2,letterSpacing:1,textTransform:"uppercase"}}>International · Accounts</div>
+          {isBranch&&<div style={{marginTop:6,fontSize:11,background:"#ffffff33",color:"#fff",padding:"2px 8px",borderRadius:10,display:"inline-block",fontWeight:700}}>🌿 {currentUser.branchName||"Yercaud"}</div>}
         </div>
         <nav style={{flex:1,padding:"10px 8px",overflowY:"auto"}}>
           {visibleNav.map(n=>(
-            <button key={n.id} onClick={()=>setTab(n.id)} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"9px 14px",borderRadius:8,border:"none",cursor:"pointer",background:tab===n.id?"#ffffff22":"transparent",color:tab===n.id?"#fff":"#ffffff88",fontWeight:tab===n.id?700:500,fontSize:13,fontFamily:"inherit",marginBottom:2,textAlign:"left"}}>
+            <button key={n.id} onClick={()=>{setTab(n.id);document.getElementById("cv-sb").classList.remove("open");document.getElementById("cv-ov").classList.remove("open");}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"9px 14px",borderRadius:8,border:"none",cursor:"pointer",background:tab===n.id?"#ffffff22":"transparent",color:tab===n.id?"#fff":"#ffffff88",fontWeight:tab===n.id?700:500,fontSize:13,fontFamily:"inherit",marginBottom:2,textAlign:"left"}}>
               <span style={{width:20}}>{n.icon}</span>{n.label}
             </button>
           ))}
@@ -3954,8 +4203,8 @@ export default function App() {
           <button onClick={()=>setCurrentUser(null)} style={{marginTop:8,background:"#ffffff22",border:"none",color:"#fff",padding:"5px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",width:"100%"}}>Sign Out</button>
         </div>
       </div>
-
-      <div style={{flex:1,padding:"28px 32px",overflowY:"auto"}}>
+      {/* Main content */}
+      <div className="cv-main">
         {error&&(
           <div style={{marginBottom:16,padding:"10px 16px",background:"#fee2e2",border:"1px solid #fca5a5",borderRadius:8,color:C.red,fontSize:13,fontWeight:600,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             {error}
@@ -3963,7 +4212,8 @@ export default function App() {
           </div>
         )}
         {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch}/>}
-        {tab==="grn"       && <GRNModule      state={state} dispatch={dispatch} role={role}/>}
+        {tab==="grn"       && <GRNModule      state={{...state, grns: isBranch ? state.grns.filter(g=>g.location===userLoc||!g.location) : state.grns}} dispatch={dispatch} role={role} currentUser={currentUser}/>}
+        {tab==="transfer"  && <StockTransferModule state={state} dispatch={dispatch} role={role} currentUser={currentUser}/>}
         {tab==="hulling"   && <HullingModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="sales"     && <SalesModule    state={state} dispatch={dispatch} role={role}/>}
         {tab==="storage"   && <StorageModule  state={state} dispatch={dispatch} role={role}/>}
@@ -3976,6 +4226,7 @@ export default function App() {
         {tab==="accounts"  && <AccountsMaster state={state} dispatch={dispatch}/>}
         {tab==="masters"   && role==="admin" && <MastersModule state={state} dispatch={dispatch}/>}
         {tab==="users"     && role==="admin" && <UserManagement state={state} dispatch={dispatch} currentUser={currentUser}/>}
+      </div>
       </div>
     </div>
   );
