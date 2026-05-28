@@ -1,0 +1,3983 @@
+import { useState, useMemo, useEffect, useCallback } from "react";
+
+/* ═══════════════════════════════════════════════════════════════
+   COFFEE VEL INTERNATIONAL — Accounting System v4
+   Supabase · Multi-user · Daybook → Ledger · Stock · P&L
+═══════════════════════════════════════════════════════════════ */
+
+// ── SUPABASE CONFIG ───────────────────────────────────────────────
+const SB_URL  = "https://tinwfojihvqzjfxeghkg.supabase.co";
+const SB_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRpbndmb2ppaHZxempmeGVnaGtnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk1MDQ5MDAsImV4cCI6MjA5NTA4MDkwMH0.zZlbstfQBfk04m8b92pAB1WhU1XhLam1_uUz3q1fKdQ";
+const SB_HDR  = {
+  "Content-Type":  "application/json",
+  "apikey":        SB_KEY,
+  "Authorization": `Bearer ${SB_KEY}`,
+  "Prefer":        "return=representation",
+};
+
+async function sb(method, table, { body, q="" } = {}) {
+  const res = await fetch(`${SB_URL}/rest/v1/${table}${q}`, {
+    method, headers: SB_HDR,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(()=>({}));
+    throw new Error(e.message || `DB error ${res.status} on ${table}`);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+// ── DATABASE API ──────────────────────────────────────────────────
+const db = {
+  // USERS
+  login:       (u,p)    => sb("GET","cv_users",{q:`?username=eq.${encodeURIComponent(u)}&password=eq.${encodeURIComponent(p)}&select=*`}).then(r=>r?.[0]||null),
+  getUsers:    ()       => sb("GET","cv_users",{q:"?select=*&order=created_at.asc"}),
+  addUser:     (d)      => sb("POST","cv_users",{body:d}),
+  editUser:    (id,d)   => sb("PATCH","cv_users",{body:d,q:`?id=eq.${id}`}),
+  deleteUser:  (id)     => sb("DELETE","cv_users",{q:`?id=eq.${id}`}),
+
+  // ACCOUNTS
+  getAccounts: ()       => sb("GET","cv_accounts",{q:"?select=*&order=group.asc,name.asc"}),
+  addAccount:  (d)      => sb("POST","cv_accounts",{body:d}),
+  patchBalance:(id,bal) => sb("PATCH","cv_accounts",{body:{balance:bal},q:`?id=eq.${id}`}),
+
+  // PARTIES
+  getParties:  ()       => sb("GET","cv_parties",{q:"?select=*&order=name.asc"}),
+  addParty:    (d)      => sb("POST","cv_parties",{body:d}),
+  editParty:   (id,d)   => sb("PATCH","cv_parties",{body:d,q:`?id=eq.${id}`}),
+
+  // VOUCHERS
+  getVouchers: ()       => sb("GET","cv_vouchers",{q:"?select=*&order=posted_at.desc"}),
+  addVoucher:  (d)      => sb("POST","cv_vouchers",{body:d}),
+  patchVoucher:(id,d)   => sb("PATCH","cv_vouchers",{body:d,q:`?id=eq.${id}`}),
+  deleteVoucher:(id)    => sb("DELETE","cv_vouchers",{q:`?id=eq.${id}`}),
+  getSeq:      (vt)     => sb("GET","cv_voucher_seq",{q:`?voucher_type=eq.${vt}&select=next_no`}).then(r=>r?.[0]?.next_no||1),
+  incSeq:      (vt,n)   => sb("PATCH","cv_voucher_seq",{body:{next_no:n+1},q:`?voucher_type=eq.${vt}`}),
+
+  // STOCK ITEMS
+  getStockItems:()      => sb("GET","cv_stock_items",{q:"?select=name&order=name.asc"}).then(r=>r?.map(x=>x.name)||[]),
+  addStockItem: (name)  => sb("POST","cv_stock_items",{body:{name}}),
+  renameStockItem:(o,n) => sb("PATCH","cv_stock_items",{body:{name:n},q:`?name=eq.${encodeURIComponent(o)}`}),
+  deleteStockItem:(name)=> sb("DELETE","cv_stock_items",{q:`?name=eq.${encodeURIComponent(name)}`}),
+
+  // GRNs
+  getGRNs:     ()       => sb("GET","cv_grns",{q:"?select=*&order=created_at.desc"}),
+  addGRN:      (d)      => sb("POST","cv_grns",{body:d}),
+  editGRN:     (id,d)   => sb("PATCH","cv_grns",{body:d,q:`?id=eq.${id}`}),
+  addQuality:  (id,qr)  => sb("PATCH","cv_grns",{body:{qualityReport:qr},q:`?id=eq.${id}`}),
+  deleteGRN:   (id)     => sb("DELETE","cv_grns",{q:`?id=eq.${id}`}),
+  getGRNSeq:   ()       => sb("GET","cv_grn_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incGRNSeq:   (n)      => sb("PATCH","cv_grn_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+
+  // Apply double-entry balance changes
+  async applyEntries(accounts, entries, sign) {
+    for (const e of entries) {
+      let acc = accounts[e.accountId];
+      // If not in state (e.g. newly created party account), fetch from DB
+      if (!acc) {
+        const rows = await sb("GET","cv_accounts",{q:`?id=eq.${e.accountId}&select=id,balance,type`});
+        acc = rows?.[0];
+      }
+      if (!acc) continue;
+      const dr = parseFloat(e.dr||0) * sign;
+      const cr = parseFloat(e.cr||0) * sign;
+      const delta = ["asset","expense"].includes(acc.type) ? dr-cr : cr-dr;
+      const newBal = parseFloat(acc.balance||0) + delta;
+      await db.patchBalance(e.accountId, newBal);
+    }
+  },
+
+  // MASTERS
+  getWarehouses:    ()      => sb("GET","cv_warehouses",{q:"?select=*&order=name.asc"}),
+  addWarehouse:     (name)  => sb("POST","cv_warehouses",{body:{name}}),
+  editWarehouse:    (id,name)=> sb("PATCH","cv_warehouses",{body:{name},q:`?id=eq.${id}`}),
+  deleteWarehouse:  (id)    => sb("DELETE","cv_warehouses",{q:`?id=eq.${id}`}),
+
+  getLocations:     ()      => sb("GET","cv_locations",{q:"?select=*&order=name.asc"}),
+  addLocation:      (name)  => sb("POST","cv_locations",{body:{name}}),
+  editLocation:     (id,name)=> sb("PATCH","cv_locations",{body:{name},q:`?id=eq.${id}`}),
+  deleteLocation:   (id)    => sb("DELETE","cv_locations",{q:`?id=eq.${id}`}),
+
+  getCoffeeTypes:   ()      => sb("GET","cv_coffee_types",{q:"?select=*&order=name.asc"}),
+  addCoffeeType:    (name)  => sb("POST","cv_coffee_types",{body:{name}}),
+  editCoffeeType:   (id,name)=> sb("PATCH","cv_coffee_types",{body:{name},q:`?id=eq.${id}`}),
+  deleteCoffeeType: (id)    => sb("DELETE","cv_coffee_types",{q:`?id=eq.${id}`}),
+
+  // SAFE DELETE - check usage first
+  deleteAccount: async (id, vouchers, grns) => {
+    const usedInVouchers = vouchers.some(v => v.entries?.some(e => e.accountId === id));
+    if (usedInVouchers) throw new Error("Cannot delete — account has transactions");
+    return sb("DELETE","cv_accounts",{q:`?id=eq.${id}`});
+  },
+  deleteParty: async (id, vouchers, grns) => {
+    const usedInVouchers = vouchers.some(v => v.entries?.some(e => e.accountId === id));
+    const usedInGRNs = grns.some(g => g.partyId === id);
+    if (usedInVouchers || usedInGRNs) throw new Error("Cannot delete — party has transactions or GRNs");
+    await sb("DELETE","cv_parties",{q:`?id=eq.${id}`});
+    return sb("DELETE","cv_accounts",{q:`?id=eq.${id}`});
+  },
+
+  // DRYING JOBS
+  getDryingJobs:  ()     => sb("GET","cv_drying_jobs",{q:"?select=*&order=created_at.desc"}),
+  addDryingJob:   (d)    => sb("POST","cv_drying_jobs",{body:d}),
+  deleteDryingJob:(id)   => sb("DELETE","cv_drying_jobs",{q:`?id=eq.${id}`}),
+  getDryingSeq:   ()     => sb("GET","cv_drying_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incDryingSeq:   (n)    => sb("PATCH","cv_drying_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+
+  // STORAGE LOTS
+  getStorageLots:     ()     => sb("GET","cv_storage_lots",{q:"?select=*&order=created_at.desc"}),
+  addStorageLot:      (d)    => sb("POST","cv_storage_lots",{body:d}),
+  updateStorageStatus:(id,s) => sb("PATCH","cv_storage_lots",{body:{status:s},q:`?id=eq.${id}`}),
+  deleteStorageLot:   (id)   => sb("DELETE","cv_storage_lots",{q:`?id=eq.${id}`}),
+  getStorageSeq:      ()     => sb("GET","cv_storage_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incStorageSeq:      (n)    => sb("PATCH","cv_storage_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+  getStorageReleases: ()     => sb("GET","cv_storage_releases",{q:"?select=*&order=created_at.desc"}),
+  addStorageRelease:  (d)    => sb("POST","cv_storage_releases",{body:d}),
+
+  // HULLING
+  getHullingJobs: ()    => sb("GET","cv_hulling_jobs",{q:"?select=*&order=created_at.desc"}),
+  addHullingJob:  (d)   => sb("POST","cv_hulling_jobs",{body:d}),
+  deleteHullingJob:(id) => sb("DELETE","cv_hulling_jobs",{q:`?id=eq.${id}`}),
+  getHullingSeq:  ()    => sb("GET","cv_hulling_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incHullingSeq:  (n)   => sb("PATCH","cv_hulling_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+
+  // SALES
+  getSales:     ()    => sb("GET","cv_sales",{q:"?select=*&order=created_at.desc"}),
+  addSale:      (d)   => sb("POST","cv_sales",{body:d}),
+  deleteSale:   (id)  => sb("DELETE","cv_sales",{q:`?id=eq.${id}`}),
+  getSalesSeq:  ()    => sb("GET","cv_sales_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incSalesSeq:  (n)   => sb("PATCH","cv_sales_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+};
+
+
+// ── CONSTANTS ────────────────────────────────────────────────────
+const DEFAULT_COFFEE_ITEMS = [
+  "Wet Parchment","Parchment","Dry Cherry","Cherry",
+  "Coffee Rice (Bulk)","Grade AA","Grade A","Grade B",
+  "Grade C","Grade PB","Grade BBB",
+];
+
+const PRESET_ACCOUNTS = [
+  { id:"cash",      name:"Cash in Hand",      group:"Cash & Bank", type:"asset"     },
+  { id:"sales",     name:"Sales Account",       group:"Income",      type:"income"    },
+  { id:"purchases", name:"Purchase Account",    group:"Expenses",    type:"expense"   },
+  { id:"curing",         name:"Curing Income",   group:"Income",   type:"income"  },
+  { id:"curing_expense", name:"Curing Expense",  group:"Expenses", type:"expense" },
+  { id:"drying",    name:"Drying Charges",      group:"Income",      type:"income"    },
+  { id:"transport", name:"Transport Expenses",  group:"Expenses",    type:"expense"   },
+  { id:"salary",    name:"Salary & Wages",      group:"Expenses",    type:"expense"   },
+  { id:"capital",   name:"Capital Account",     group:"Capital",     type:"liability" },
+];
+
+const VOUCHER_TYPES = [
+  { id:"RV",  label:"Receipt",  color:"#22c55e", icon:"↓" },
+  { id:"PV",  label:"Payment",  color:"#ef4444", icon:"↑" },
+  { id:"CV",  label:"Contra",   color:"#8b5cf6", icon:"⇄" },
+  { id:"JV",  label:"Journal",  color:"#f59e0b", icon:"✎" },
+  { id:"SV",  label:"Sales",    color:"#3b82f6", icon:"🏷" },
+];
+
+const ROLES = {
+  admin:      { label:"Admin",      canDelete:true,  canPost:true,  canViewReports:true  },
+  accountant: { label:"Accountant", canDelete:false, canPost:true,  canViewReports:true  },
+  viewer:     { label:"View Only",  canDelete:false, canPost:false, canViewReports:true  },
+};
+
+// ── DESIGN ────────────────────────────────────────────────────────
+const C = {
+  bg:"#faf6f0", surface:"#ffffff", border:"#e8ddd0",
+  text:"#2c1a0e", muted:"#8c7560", accent:"#6b3f1a",
+  green:"#15803d", red:"#b91c1c", blue:"#1d4ed8",
+  gold:"#92400e", cream:"#fdf8f2",
+};
+const sh = {
+  input:{ border:`1px solid ${C.border}`, borderRadius:6, padding:"7px 10px", fontSize:13, background:C.cream, color:C.text, outline:"none", fontFamily:"inherit", width:"100%", boxSizing:"border-box" },
+  label:{ fontSize:11, fontWeight:700, color:C.muted, letterSpacing:0.5, textTransform:"uppercase", display:"block", marginBottom:3 },
+  card:{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:"18px 20px", boxShadow:"0 1px 4px #00000012" },
+  th:{ textAlign:"left", padding:"8px 12px", fontSize:11, color:C.muted, fontWeight:700, letterSpacing:0.5, textTransform:"uppercase", borderBottom:`2px solid ${C.border}`, whiteSpace:"nowrap" },
+  td:{ padding:"9px 12px", fontSize:13, color:C.text, borderBottom:`1px solid #f0e8e0` },
+};
+
+// ── HELPERS ───────────────────────────────────────────────────────
+const fmt  = n => "₹"+Math.abs(Number(n)||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtQ = n => Number(n).toLocaleString("en-IN",{maximumFractionDigits:3});
+const today= ()=> new Date().toISOString().slice(0,10);
+const vInfo= id=> VOUCHER_TYPES.find(v=>v.id===id)||{};
+
+// Trial balance Dr/Cr direction
+const tbDr = a => ["asset","expense"].includes(a.type) ? (a.balance>0?a.balance:0) : (a.balance<0?Math.abs(a.balance):0);
+const tbCr = a => ["liability","income","capital"].includes(a.type) ? (a.balance>0?a.balance:0) : (a.balance<0?Math.abs(a.balance):0);
+const balLabel = a => tbDr(a)>0 ? "Dr" : "Cr";
+const balColor = a => tbDr(a)>0 ? C.green : C.red;
+
+// ── SHARED UI ─────────────────────────────────────────────────────
+function Field({ label, children, style }) {
+  return <div style={{display:"flex",flexDirection:"column",gap:3,...style}}><label style={sh.label}>{label}</label>{children}</div>;
+}
+function Btn({ children, onClick, variant="primary", size="md", disabled }) {
+  const bg={primary:C.accent,success:"#15803d",danger:"#b91c1c",ghost:"transparent",outline:"transparent"}[variant];
+  const cl={primary:"#fff",success:"#fff",danger:"#fff",ghost:C.muted,outline:C.accent}[variant];
+  const br={ghost:`1px solid ${C.border}`,outline:`1px solid ${C.accent}`}[variant]||"none";
+  const pd={sm:"4px 10px",md:"7px 16px",lg:"10px 24px"}[size];
+  return <button onClick={onClick} disabled={disabled} style={{background:bg,color:cl,border:br,borderRadius:6,padding:pd,fontSize:size==="sm"?12:13,fontWeight:600,cursor:disabled?"not-allowed":"pointer",fontFamily:"inherit",opacity:disabled?0.5:1}}>{children}</button>;
+}
+function VBadge({ type }) {
+  const v=vInfo(type);
+  return <span style={{background:(v.color||"#888")+"18",color:v.color||"#888",border:`1px solid ${(v.color||"#888")}33`,padding:"2px 8px",borderRadius:20,fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{v.icon} {v.label}</span>;
+}
+function Modal({ title, children, onClose }) {
+  return (
+    <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{...sh.card,width:"100%",maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontWeight:800,fontSize:16,color:C.accent}}>{title}</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:C.muted}}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+
+// ── VOUCHER FORM ──────────────────────────────────────────────────
+function blankEntries(type, firstBankId=""){
+  if(type==="RV")  return [{accountId:"cash",     dr:"",cr:"",narration:""},{accountId:"",dr:"",cr:"",narration:""}];
+  if(type==="PV")  return [{accountId:"",         dr:"",cr:"",narration:""},{accountId:"cash",dr:"",cr:"",narration:""}];
+  if(type==="CV")  return [{accountId:firstBankId,dr:"",cr:"",narration:""},{accountId:"cash",dr:"",cr:"",narration:""}];
+  if(type==="PuV") return [{accountId:"purchases",dr:"",cr:"",narration:""},{accountId:"",dr:"",cr:"",narration:""}];
+  if(type==="SV")  return [{accountId:"",         dr:"",cr:"",narration:""},{accountId:"sales",dr:"",cr:"",narration:""}];
+  return [{accountId:"",dr:"",cr:"",narration:""},{accountId:"",dr:"",cr:"",narration:""}];
+}
+
+function ItemRows({ items, onChange, voucherType, stockItems }) {
+  const add=()=>onChange([...items,{itemName:"",customItem:"",qty:"",unit:"kg",rate:"",amount:0}]);
+  const remove=i=>items.length>1&&onChange(items.filter((_,idx)=>idx!==i));
+  const update=(i,field,val)=>{
+    const updated=items.map((it,idx)=>{
+      if(idx!==i) return it;
+      const next={...it,[field]:val};
+      if(field==="qty"||field==="rate") next.amount=parseFloat(next.qty||0)*parseFloat(next.rate||0);
+      return next;
+    });
+    onChange(updated);
+  };
+  const total=items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
+  return (
+    <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+      <div style={{background:"#f5ede4",padding:"8px 12px",fontSize:12,fontWeight:700,color:C.accent}}>
+        📦 {voucherType==="PuV"?"Purchase":"Sales"} Items
+      </div>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr style={{background:"#fdf5ee"}}>
+          <th style={sh.th}>Item</th>
+          <th style={{...sh.th,width:80}}>Qty</th>
+          <th style={{...sh.th,width:70}}>Unit</th>
+          <th style={{...sh.th,width:100,textAlign:"right"}}>Rate (₹)</th>
+          <th style={{...sh.th,width:110,textAlign:"right"}}>Amount (₹)</th>
+          <th style={{...sh.th,width:30}}></th>
+        </tr></thead>
+        <tbody>
+          {items.map((it,i)=>(
+            <tr key={i}>
+              <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}>
+                <select value={it.itemName==="__custom__"?"__custom__":it.itemName}
+                  onChange={e=>update(i,"itemName",e.target.value)} style={sh.input}>
+                  <option value="">— Select Item —</option>
+                  {stockItems.map(c=><option key={c} value={c}>{c}</option>)}
+                  <option value="__custom__">✏ Custom Item…</option>
+                </select>
+                {it.itemName==="__custom__"&&<input placeholder="Type item name" value={it.customItem||""} onChange={e=>update(i,"customItem",e.target.value)} style={{...sh.input,marginTop:4}}/>}
+              </td>
+              <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}>
+                <input type="number" placeholder="0" value={it.qty} onChange={e=>update(i,"qty",e.target.value)} style={{...sh.input,textAlign:"right"}}/>
+              </td>
+              <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}>
+                <select value={it.unit} onChange={e=>update(i,"unit",e.target.value)} style={sh.input}>
+                  <option value="kg">kg</option><option value="units">units</option>
+                  <option value="paka">paka</option><option value="bags">bags</option><option value="MT">MT</option>
+                </select>
+              </td>
+              <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}>
+                <input type="number" placeholder="0.00" value={it.rate} onChange={e=>update(i,"rate",e.target.value)} style={{...sh.input,textAlign:"right"}}/>
+              </td>
+              <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:C.accent}}>{fmt(it.amount||0)}</td>
+              <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,textAlign:"center"}}>
+                <button onClick={()=>remove(i)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>×</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot><tr style={{background:"#f5ede4"}}>
+          <td style={{padding:"8px 12px"}}><button onClick={add} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit"}}>+ Add Item</button></td>
+          <td colSpan={3} style={{padding:"8px 12px",textAlign:"right",fontWeight:700,color:C.muted,fontSize:12}}>TOTAL</td>
+          <td style={{padding:"8px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.accent}}>{fmt(total)}</td>
+          <td></td>
+        </tr></tfoot>
+      </table>
+    </div>
+  );
+}
+
+function VoucherForm({ state, dispatch, initial, onDone, editId }) {
+  const [vType,setVType]       = useState(initial?.voucherType||"RV");
+  const [date,setDate]         = useState(initial?.date||today());
+  const [narration,setNarration]= useState(initial?.narration||"");
+  const [reference,setReference]= useState(initial?.reference||"");
+  const [entries,setEntries]   = useState(initial?.entries||blankEntries(initial?.voucherType||"RV",""));
+  const [items,setItems]       = useState(initial?.items||[{itemName:"",customItem:"",qty:"",unit:"kg",rate:"",amount:0}]);
+  const [formError,setFormError]= useState("");
+
+  const isSV=vType==="SV", isPuV=vType==="PuV", hasItems=isSV||isPuV;
+  const allAccounts=Object.values(state.accounts).sort((a,b)=>a.name.localeCompare(b.name));
+  const firstBankId=allAccounts.find(a=>a.group==="Cash & Bank"&&a.id!=="cash")?.id||"";
+  const groups=["Cash & Bank","Debtors","Creditors","Income","Expenses","Capital","Other"];
+
+  const AccSelect=({value,onChange})=>(
+    <select value={value} onChange={onChange} style={sh.input}>
+      <option value="">— Select Account —</option>
+      {groups.map(grp=>{
+        const accs=allAccounts.filter(a=>(a.group||"Other")===grp);
+        if(!accs.length) return null;
+        return <optgroup key={grp} label={grp}>{accs.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>;
+      })}
+    </select>
+  );
+
+  const itemTotal=items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
+  const syncedEntries=useMemo(()=>{
+    if(!hasItems||itemTotal===0) return entries;
+    return entries.map((e,i)=>{
+      if(isPuV) return i===0?{...e,dr:itemTotal.toFixed(2)}:{...e,cr:itemTotal.toFixed(2)};
+      if(isSV)  return i===0?{...e,dr:itemTotal.toFixed(2)}:{...e,cr:itemTotal.toFixed(2)};
+      return e;
+    });
+  },[entries,itemTotal,hasItems,isPuV,isSV]);
+
+  const totalDr=syncedEntries.reduce((s,e)=>s+parseFloat(e.dr||0),0);
+  const totalCr=syncedEntries.reduce((s,e)=>s+parseFloat(e.cr||0),0);
+  const balanced=Math.abs(totalDr-totalCr)<0.01&&totalDr>0;
+
+  const updateEntry=(i,field,val)=>setEntries(entries.map((e,idx)=>idx===i?{...e,[field]:val}:e));
+  const addRow=()=>setEntries([...entries,{accountId:"",dr:"",cr:"",narration:""}]);
+  const removeRow=i=>entries.length>2&&setEntries(entries.filter((_,idx)=>idx!==i));
+  const switchType=t=>{setVType(t);setEntries(blankEntries(t,firstBankId));setItems([{itemName:"",customItem:"",qty:"",unit:"kg",rate:"",amount:0}]);};
+
+  const post=()=>{
+    if(!balanced){ setFormError("Voucher not balanced! Dr must equal Cr."); return; }
+    setFormError("");
+    const validEntries=syncedEntries.filter(e=>e.accountId&&(parseFloat(e.dr||0)>0||parseFloat(e.cr||0)>0));
+    if(validEntries.length<2){ setFormError("At least 2 account entries required."); return; }
+    const resolvedItems=hasItems?items.filter(it=>(it.itemName||it.customItem)&&parseFloat(it.qty||0)>0)
+      .map(it=>({...it,itemName:it.itemName==="__custom__"?(it.customItem||"Custom"):it.itemName})):[];
+    const data={voucherType:vType,date,narration,reference,entries:validEntries,items:resolvedItems};
+    if(editId) dispatch({type:"EDIT_VOUCHER",id:editId,data});
+    else       dispatch({type:"POST_VOUCHER",data});
+    onDone();
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {VOUCHER_TYPES.map(v=>(
+          <button key={v.id} onClick={()=>switchType(v.id)} style={{padding:"5px 12px",borderRadius:20,border:`2px solid ${vType===v.id?v.color:C.border}`,background:vType===v.id?v.color+"18":"transparent",color:vType===v.id?v.color:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{v.icon} {v.label}</button>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+        <Field label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={sh.input}/></Field>
+        <Field label="Ref / Cheque No."><input value={reference} onChange={e=>setReference(e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+        <Field label="Narration" style={{gridColumn:"span 2"}}><input value={narration} onChange={e=>setNarration(e.target.value)} placeholder="Description" style={sh.input}/></Field>
+      </div>
+      {hasItems&&<ItemRows items={items} onChange={setItems} voucherType={vType}
+        stockItems={[
+          ...(state.coffeeTypes?.map(c=>c.name)||[]),
+          "Grade AA","Grade A","Grade B","Grade C","Grade PB","Grade BBB","Bits","Coffee Rice (Bulk)",
+        ].filter((v,i,a)=>a.indexOf(v)===i)}
+      />}
+      <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+        <div style={{background:"#f5ede4",padding:"8px 12px",fontSize:12,fontWeight:700,color:C.accent}}>
+          📒 Accounting Entries {hasItems&&itemTotal>0&&<span style={{color:C.muted,fontWeight:400,marginLeft:8}}>(amounts auto-filled)</span>}
+        </div>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead><tr style={{background:"#fdf5ee"}}>
+            <th style={sh.th}>Account</th>
+            <th style={{...sh.th,width:110,textAlign:"right"}}>Dr (₹)</th>
+            <th style={{...sh.th,width:110,textAlign:"right"}}>Cr (₹)</th>
+            <th style={sh.th}>Line Narration</th>
+            <th style={{...sh.th,width:30}}></th>
+          </tr></thead>
+          <tbody>
+            {syncedEntries.map((e,i)=>(
+              <tr key={i}>
+                <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}><AccSelect value={e.accountId} onChange={ev=>updateEntry(i,"accountId",ev.target.value)}/></td>
+                <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}>
+                  <input type="number" placeholder="0.00" value={e.dr} readOnly={hasItems} onChange={ev=>!hasItems&&updateEntry(i,"dr",ev.target.value)} style={{...sh.input,textAlign:"right",color:C.blue,background:hasItems&&e.dr?"#eff6ff":C.cream}}/>
+                </td>
+                <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}>
+                  <input type="number" placeholder="0.00" value={e.cr} readOnly={hasItems} onChange={ev=>!hasItems&&updateEntry(i,"cr",ev.target.value)} style={{...sh.input,textAlign:"right",color:C.red,background:hasItems&&e.cr?"#fef2f2":C.cream}}/>
+                </td>
+                <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`}}>
+                  <input placeholder="Note…" value={e.narration} onChange={ev=>updateEntry(i,"narration",ev.target.value)} style={sh.input}/>
+                </td>
+                <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,textAlign:"center"}}>
+                  <button onClick={()=>removeRow(i)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>×</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot><tr style={{background:"#f5ede4"}}>
+            <td style={{padding:"8px 12px"}}>
+              {!hasItems&&<button onClick={addRow} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit"}}>+ Add Row</button>}
+            </td>
+            <td style={{padding:"8px 12px",textAlign:"right",fontWeight:700,color:C.blue,fontFamily:"monospace"}}>{fmt(totalDr)}</td>
+            <td style={{padding:"8px 12px",textAlign:"right",fontWeight:700,color:C.red,fontFamily:"monospace"}}>{fmt(totalCr)}</td>
+            <td colSpan={2} style={{padding:"8px 12px"}}>
+              {totalDr>0&&<span style={{fontSize:12,fontWeight:700,color:balanced?C.green:C.red}}>{balanced?"✓ Balanced":`⚠ Diff: ${fmt(Math.abs(totalDr-totalCr))}`}</span>}
+            </td>
+          </tr></tfoot>
+        </table>
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <Btn onClick={post} variant="success" size="lg" disabled={!balanced}>{editId?"✓ Save Changes":"✓ Post Voucher"}</Btn>
+        <Btn onClick={onDone} variant="ghost">Cancel</Btn>
+      </div>
+      {formError&&<div style={{color:C.red,fontWeight:700,fontSize:13,padding:"8px 12px",background:"#fee2e2",borderRadius:6}}>{formError}</div>}
+    </div>
+  );
+}
+
+// ── DAYBOOK ───────────────────────────────────────────────────────
+function Daybook({ state, dispatch, role }) {
+  const [showForm,setShowForm]   = useState(false);
+  const [defaultType,setDefaultType]= useState("RV");
+  const [editVoucher,setEditVoucher]= useState(null);
+  const [filterDate,setFilterDate]  = useState("");
+  const [filterType,setFilterType]  = useState("all");
+  const [expandedId,setExpandedId]  = useState(null);
+  const [confirmDeleteId,setConfirmDeleteId] = useState(null);
+
+  const canPost=ROLES[role]?.canPost;
+  const canDelete=ROLES[role]?.canDelete;
+
+  const vouchers=useMemo(()=>state.vouchers.filter(v=>{
+    if(filterType!=="all"&&v.voucherType!==filterType) return false;
+    if(filterDate&&v.date!==filterDate) return false;
+    return true;
+  }),[state.vouchers,filterType,filterDate]);
+
+  const openNew=t=>{setEditVoucher(null);setDefaultType(t);setShowForm(true);};
+  const openEdit=v=>{setEditVoucher(v);setShowForm(true);setExpandedId(null);};
+  const closeForm=()=>{setShowForm(false);setEditVoucher(null);};
+  const doDelete=id=>setConfirmDeleteId(id);
+  const confirmDelete=()=>{dispatch({type:"DELETE_VOUCHER",id:confirmDeleteId});setConfirmDeleteId(null);setExpandedId(null);};
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📓 Day Book</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Coffee Vel International · All Voucher Entries</p>
+        </div>
+        {canPost&&(
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {VOUCHER_TYPES.map(v=>(
+              <button key={v.id} onClick={()=>openNew(v.id)} style={{padding:"6px 12px",borderRadius:6,border:`1px solid ${v.color}`,background:v.color+"12",color:v.color,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{v.icon} {v.label}</button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {confirmDeleteId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 32px",maxWidth:380,width:"100%",boxShadow:"0 20px 60px #00000044",textAlign:"center"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:17,color:C.text,marginBottom:8}}>Delete Voucher?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>This will permanently reverse all accounting entries for <strong>{confirmDeleteId}</strong>.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={confirmDelete}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmDeleteId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>{editVoucher?`✏ Edit — ${editVoucher.id}`:"New Voucher Entry"}</div>
+          <VoucherForm state={state} dispatch={dispatch} initial={editVoucher?{...editVoucher}:{voucherType:defaultType}} editId={editVoucher?.id} onDone={closeForm}/>
+        </div>
+      )}
+
+      <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <Field label="Filter by Date"><input type="date" value={filterDate} onChange={e=>setFilterDate(e.target.value)} style={{...sh.input,width:160}}/></Field>
+        <Field label="Voucher Type">
+          <select value={filterType} onChange={e=>setFilterType(e.target.value)} style={{...sh.input,width:150}}>
+            <option value="all">All Types</option>
+            {VOUCHER_TYPES.map(v=><option key={v.id} value={v.id}>{v.label}</option>)}
+          </select>
+        </Field>
+        {(filterDate||filterType!=="all")&&<Btn variant="ghost" size="sm" onClick={()=>{setFilterDate("");setFilterType("all");}}>✕ Clear</Btn>}
+        <span style={{marginLeft:"auto",color:C.muted,fontSize:13,alignSelf:"flex-end"}}>{vouchers.length} voucher{vouchers.length!==1?"s":""}</span>
+      </div>
+
+      {vouchers.length===0?(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:36,marginBottom:8}}>📓</div>No entries yet.
+        </div>
+      ):vouchers.map(v=>{
+        const expanded=expandedId===v.id;
+        const totalDr=v.entries.reduce((s,e)=>s+parseFloat(e.dr||0),0);
+        return (
+          <div key={v.id} style={{...sh.card,padding:0,overflow:"hidden"}}>
+            <div onClick={()=>setExpandedId(expanded?null:v.id)} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 16px",cursor:"pointer",background:expanded?"#fdf0e8":C.surface,flexWrap:"wrap"}}>
+              <VBadge type={v.voucherType}/>
+              <span style={{fontWeight:800,color:C.accent,fontSize:13,fontFamily:"monospace",minWidth:90}}>{v.id}</span>
+              <span style={{fontSize:13,color:C.muted,minWidth:90}}>{v.date}</span>
+              <span style={{flex:1,fontSize:13,color:C.text}}>{v.narration||"—"}</span>
+              {v.reference&&<span style={{fontSize:11,color:C.muted,background:"#f0e8de",padding:"2px 8px",borderRadius:4}}>Ref: {v.reference}</span>}
+              {v.editedAt&&<span style={{fontSize:10,color:C.muted,fontStyle:"italic"}}>edited</span>}
+              <span style={{fontFamily:"monospace",fontWeight:800,color:C.accent,fontSize:14}}>{fmt(totalDr)}</span>
+              <span style={{color:C.muted}}>{expanded?"▲":"▼"}</span>
+            </div>
+            {expanded&&(
+              <div style={{borderTop:`1px solid ${C.border}`}}>
+                {v.items&&v.items.length>0&&(
+                  <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`}}>
+                    <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:8,textTransform:"uppercase"}}>Items</div>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                      <thead><tr style={{background:"#fdf5ee"}}>
+                        <th style={sh.th}>Item</th><th style={{...sh.th,textAlign:"right"}}>Qty</th>
+                        <th style={sh.th}>Unit</th><th style={{...sh.th,textAlign:"right"}}>Rate</th><th style={{...sh.th,textAlign:"right"}}>Amount</th>
+                      </tr></thead>
+                      <tbody>{v.items.map((it,i)=>(
+                        <tr key={i}>
+                          <td style={sh.td}>{it.itemName}</td>
+                          <td style={{...sh.td,textAlign:"right",fontFamily:"monospace"}}>{fmtQ(it.qty)}</td>
+                          <td style={sh.td}>{it.unit}</td>
+                          <td style={{...sh.td,textAlign:"right",fontFamily:"monospace"}}>{fmt(it.rate)}</td>
+                          <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700}}>{fmt(it.amount)}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                )}
+                <table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <thead><tr style={{background:"#fdf5ee"}}>
+                    <th style={sh.th}>Account</th><th style={{...sh.th,textAlign:"right"}}>Dr</th>
+                    <th style={{...sh.th,textAlign:"right"}}>Cr</th><th style={sh.th}>Narration</th>
+                  </tr></thead>
+                  <tbody>{v.entries.map((e,i)=>{
+                    const acc=state.accounts[e.accountId];
+                    return(
+                      <tr key={i}>
+                        <td style={sh.td}>{acc?.name||e.accountId}</td>
+                        <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.blue}}>{parseFloat(e.dr||0)>0?fmt(e.dr):"—"}</td>
+                        <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red}}>{parseFloat(e.cr||0)>0?fmt(e.cr):"—"}</td>
+                        <td style={{...sh.td,color:C.muted,fontStyle:"italic"}}>{e.narration||"—"}</td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+                <div style={{padding:"10px 16px",display:"flex",gap:8,justifyContent:"flex-end",background:"#fdf8f4"}}>
+                  {canPost&&<Btn size="sm" variant="outline" onClick={()=>openEdit(v)}>✏ Edit</Btn>}
+                  {canDelete&&<Btn size="sm" variant="danger" onClick={()=>doDelete(v.id)}>🗑 Delete</Btn>}
+                  {!canPost&&!canDelete&&<span style={{fontSize:12,color:C.muted}}>View only</span>}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── LEDGER ────────────────────────────────────────────────────────
+function LedgerView({ state }) {
+  const [selectedAcc,setSelectedAcc]=useState("");
+  const allAccounts=Object.values(state.accounts).sort((a,b)=>a.name.localeCompare(b.name));
+  const account=selectedAcc?state.accounts[selectedAcc]:null;
+  const groups=["Cash & Bank","Debtors","Creditors","Income","Expenses","Capital","Other"];
+
+  const ledgerEntries=useMemo(()=>{
+    if(!selectedAcc) return [];
+    const lines=[];
+    const sorted=[...state.vouchers].sort((a,b)=>{
+      const dateComp = (a.date||"").localeCompare(b.date||"");
+      if (dateComp!==0) return dateComp;
+      return (a.postedAt||a.posted_at||"").localeCompare(b.postedAt||b.posted_at||"");
+    });
+    const acc=state.accounts[selectedAcc];
+    const isDebitNormal = ["asset","expense"].includes(acc?.type);
+    let balance=0;
+    sorted.forEach(v=>{
+      v.entries.forEach(e=>{
+        if(e.accountId!==selectedAcc) return;
+        const dr=parseFloat(e.dr||0), cr=parseFloat(e.cr||0);
+        balance += isDebitNormal ? dr-cr : cr-dr;
+        lines.push({
+          voucherId:v.id,
+          voucherType:v.voucherType||v.voucher_type,
+          date:v.date,
+          narration:e.narration||v.narration||"",
+          dr, cr, balance
+        });
+      });
+    });
+    return lines;
+  },[selectedAcc,state.vouchers,state.accounts]);
+
+  // Use computed closing balance from entries (more accurate than DB balance)
+  const computedBalance = ledgerEntries.length>0 ? ledgerEntries[ledgerEntries.length-1].balance : 0;
+
+  return (
+    <div style={{display:"flex",gap:20}}>
+      <div style={{width:230,flexShrink:0}}>
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{padding:"12px 16px",background:C.accent,color:"#fff",fontWeight:800,fontSize:14}}>📂 Accounts</div>
+          <div style={{overflowY:"auto",maxHeight:"72vh"}}>
+            {groups.map(grp=>{
+              const accs=allAccounts.filter(a=>(a.group||"Other")===grp);
+              if(!accs.length) return null;
+              return(
+                <div key={grp}>
+                  <div style={{padding:"5px 14px",background:"#f5ede4",fontSize:10,fontWeight:800,color:C.muted,letterSpacing:1,textTransform:"uppercase"}}>{grp}</div>
+                  {accs.map(a=>(
+                    <div key={a.id} onClick={()=>setSelectedAcc(a.id)} style={{padding:"8px 16px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,background:selectedAcc===a.id?"#fdf0e8":"transparent",borderLeft:selectedAcc===a.id?`3px solid ${C.accent}`:"3px solid transparent"}}>
+                      <div style={{fontSize:13,fontWeight:600,color:selectedAcc===a.id?C.accent:C.text}}>{a.name}</div>
+                      <div style={{fontSize:11,color:balColor(a),fontFamily:"monospace",marginTop:1}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+      <div style={{flex:1}}>
+        {!account?(
+          <div style={{...sh.card,textAlign:"center",color:C.muted,padding:60}}><div style={{fontSize:36,marginBottom:8}}>👈</div>Select an account</div>
+        ):(
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <div style={{...sh.card,background:C.accent,color:"#fff"}}>
+              <div style={{fontSize:20,fontWeight:800}}>{account.name}</div>
+              <div style={{display:"flex",gap:24,marginTop:8,flexWrap:"wrap"}}>
+                {[["Group",account.group],["Type",account.type],["Entries",ledgerEntries.length]].map(([l,v])=>(
+                  <div key={l}><div style={{fontSize:10,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{l}</div><div style={{fontWeight:700,textTransform:"capitalize"}}>{v}</div></div>
+                ))}
+                <div><div style={{fontSize:10,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>Closing Balance</div>
+                <div style={{fontWeight:800,fontFamily:"monospace",fontSize:18}}>{fmt(Math.abs(computedBalance))} {computedBalance>=0?balLabel(account):(balLabel(account)==="Dr"?"Cr":"Dr")}</div></div>
+              </div>
+            </div>
+            <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+              <table style={{width:"100%",borderCollapse:"collapse"}}>
+                <thead><tr style={{background:"#f5ede4"}}>
+                  <th style={sh.th}>Date</th><th style={sh.th}>Voucher</th><th style={sh.th}>Particulars</th>
+                  <th style={{...sh.th,textAlign:"right"}}>Dr</th><th style={{...sh.th,textAlign:"right"}}>Cr</th><th style={{...sh.th,textAlign:"right"}}>Balance</th>
+                </tr></thead>
+                <tbody>
+                  {ledgerEntries.length===0?(
+                    <tr><td colSpan={6} style={{...sh.td,textAlign:"center",color:C.muted,padding:30}}>No transactions yet</td></tr>
+                  ):ledgerEntries.map((e,i)=>(
+                    <tr key={i} style={{background:i%2===0?C.surface:C.cream}}>
+                      <td style={sh.td}>{e.date}</td>
+                      <td style={sh.td}>
+                        <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                          <VBadge type={e.voucherType}/>
+                          <span style={{fontSize:10,color:C.muted,fontFamily:"monospace"}}>{e.voucherId}</span>
+                        </div>
+                      </td>
+                      <td style={sh.td}>{e.narration||"—"}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.blue,fontWeight:600}}>{e.dr>0?fmt(e.dr):"—"}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red,fontWeight:600}}>{e.cr>0?fmt(e.cr):"—"}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:e.balance>=0?C.green:C.red}}>
+                        {fmt(Math.abs(e.balance))} {e.balance>=0?"Dr":"Cr"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot><tr style={{background:"#f5ede4"}}>
+                  <td colSpan={3} style={{padding:"10px 12px",fontWeight:800}}>Closing Balance</td>
+                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(ledgerEntries.reduce((s,e)=>s+e.dr,0))}</td>
+                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(ledgerEntries.reduce((s,e)=>s+e.cr,0))}</td>
+                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:computedBalance>=0?C.green:C.red}}>{fmt(Math.abs(computedBalance))} {computedBalance>=0?balLabel(account):(balLabel(account)==="Dr"?"Cr":"Dr")}</td>
+                </tr></tfoot>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── PROFIT & LOSS ─────────────────────────────────────────────────
+function ProfitLoss({ state }) {
+  const [fromDate,setFromDate]=useState("");
+  const [toDate,setToDate]=useState("");
+
+  const filteredVouchers=useMemo(()=>state.vouchers.filter(v=>{
+    if(fromDate&&v.date<fromDate) return false;
+    if(toDate&&v.date>toDate) return false;
+    return true;
+  }),[state.vouchers,fromDate,toDate]);
+
+  // Compute account balances only from filtered vouchers
+  const filteredBalances=useMemo(()=>{
+    const balances={};
+    Object.values(state.accounts).forEach(a=>{balances[a.id]={...a,balance:0};});
+    filteredVouchers.forEach(v=>{
+      v.entries.forEach(e=>{
+        if(!balances[e.accountId]) return;
+        const acc=balances[e.accountId];
+        const dr=parseFloat(e.dr||0),cr=parseFloat(e.cr||0);
+        const delta=["asset","expense"].includes(acc.type)?dr-cr:cr-dr;
+        balances[e.accountId]={...acc,balance:acc.balance+delta};
+      });
+    });
+    return balances;
+  },[filteredVouchers,state.accounts]);
+
+  const incomeAccounts=Object.values(filteredBalances).filter(a=>a.type==="income"&&a.balance!==0);
+  const expenseAccounts=Object.values(filteredBalances).filter(a=>a.type==="expense"&&a.balance!==0);
+  const totalIncome=incomeAccounts.reduce((s,a)=>s+a.balance,0);
+  const totalExpense=expenseAccounts.reduce((s,a)=>s+a.balance,0);
+  const netProfit=totalIncome-totalExpense;
+
+  const SectionRow=({label,value,indent,bold,color})=>(
+    <tr>
+      <td style={{padding:"8px 16px",paddingLeft:indent?32:16,color:color||(bold?C.text:C.text),fontWeight:bold?800:400,fontSize:bold?14:13}}>{label}</td>
+      <td style={{padding:"8px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:bold?800:600,color:color||(bold?C.text:C.muted),fontSize:bold?14:13}}>{fmt(value)}</td>
+    </tr>
+  );
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📈 Profit & Loss</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Coffee Vel International</p>
+        </div>
+        <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
+          <Field label="From Date"><input type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)} style={{...sh.input,width:150}}/></Field>
+          <Field label="To Date"><input type="date" value={toDate} onChange={e=>setToDate(e.target.value)} style={{...sh.input,width:150}}/></Field>
+          {(fromDate||toDate)&&<Btn variant="ghost" size="sm" onClick={()=>{setFromDate("");setToDate("");}}>✕ All</Btn>}
+        </div>
+      </div>
+
+      {/* Summary cards */}
+      <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
+        {[
+          {label:"Total Income",value:totalIncome,color:C.green,icon:"📥"},
+          {label:"Total Expenses",value:totalExpense,color:C.red,icon:"📤"},
+          {label:netProfit>=0?"Net Profit":"Net Loss",value:Math.abs(netProfit),color:netProfit>=0?C.green:C.red,icon:netProfit>=0?"✅":"⚠️"},
+        ].map(s=>(
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:180}}>
+            <div style={{fontSize:22,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:s.color,marginTop:4}}>{fmt(s.value)}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+        {/* Income */}
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{background:C.green,color:"#fff",padding:"12px 16px",fontWeight:800,fontSize:14}}>📥 Income</div>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <tbody>
+              {incomeAccounts.length===0?(
+                <tr><td colSpan={2} style={{...sh.td,textAlign:"center",color:C.muted,padding:24}}>No income entries</td></tr>
+              ):incomeAccounts.map(a=>(
+                <SectionRow key={a.id} label={a.name} value={a.balance} indent/>
+              ))}
+            </tbody>
+            <tfoot><tr style={{background:"#f0fdf4"}}>
+              <td style={{padding:"10px 16px",fontWeight:800,color:C.green}}>Total Income</td>
+              <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmt(totalIncome)}</td>
+            </tr></tfoot>
+          </table>
+        </div>
+
+        {/* Expenses */}
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{background:C.red,color:"#fff",padding:"12px 16px",fontWeight:800,fontSize:14}}>📤 Expenses</div>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <tbody>
+              {expenseAccounts.length===0?(
+                <tr><td colSpan={2} style={{...sh.td,textAlign:"center",color:C.muted,padding:24}}>No expense entries</td></tr>
+              ):expenseAccounts.map(a=>(
+                <SectionRow key={a.id} label={a.name} value={a.balance} indent/>
+              ))}
+            </tbody>
+            <tfoot><tr style={{background:"#fff1f2"}}>
+              <td style={{padding:"10px 16px",fontWeight:800,color:C.red}}>Total Expenses</td>
+              <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(totalExpense)}</td>
+            </tr></tfoot>
+          </table>
+        </div>
+      </div>
+
+      {/* Net result */}
+      <div style={{...sh.card,background:netProfit>=0?"#f0fdf4":"#fff1f2",border:`2px solid ${netProfit>=0?C.green:C.red}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:18,fontWeight:800,color:netProfit>=0?C.green:C.red}}>{netProfit>=0?"✅ Net Profit":"⚠️ Net Loss"}</div>
+            <div style={{fontSize:13,color:C.muted,marginTop:2}}>Income {fmt(totalIncome)} − Expenses {fmt(totalExpense)}</div>
+          </div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:28,color:netProfit>=0?C.green:C.red}}>{fmt(Math.abs(netProfit))}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── PARTIES ───────────────────────────────────────────────────────
+function Parties({ state, dispatch }) {
+  const [form,setForm]=useState({name:"",partyType:"supplier",phone:"",address:""});
+  const [editId,setEditId]=useState(null);
+  const [editForm,setEditForm]=useState(null);
+  const [partyError,setPartyError]=useState("");
+  const parties=Object.values(state.parties);
+
+  const add=()=>{
+    if(!form.name.trim()){ setPartyError("Enter party name"); return; } setPartyError("");
+    dispatch({type:"ADD_PARTY",data:{...form,name:form.name.trim()}});
+    setForm(f=>({...f,name:"",phone:"",address:""}));
+  };
+  const startEdit=p=>{setEditId(p.id);setEditForm({name:p.name,partyType:p.partyType,phone:p.phone||"",address:p.address||""});};
+  const saveEdit=()=>{
+    if(!editForm.name.trim()) return;
+    dispatch({type:"EDIT_PARTY",id:editId,data:editForm});
+    setEditId(null);setEditForm(null);
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>👥 Party Accounts</h2>
+      <div style={sh.card}>
+        <div style={{fontWeight:700,color:C.accent,marginBottom:12}}>Add New Party</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+          <Field label="Party Name"><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Planter / Trader / Buyer" style={sh.input}/></Field>
+          <Field label="Type">
+            <select value={form.partyType} onChange={e=>setForm(f=>({...f,partyType:e.target.value}))} style={sh.input}>
+              <option value="supplier">Supplier (Planter / Trader)</option>
+              <option value="customer">Customer (Buyer)</option>
+            </select>
+          </Field>
+          <Field label="Phone"><input value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+          <Field label="Address"><input value={form.address} onChange={e=>setForm(f=>({...f,address:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+        </div>
+        <div style={{marginTop:14,display:"flex",alignItems:"center",gap:12}}>
+          <Btn onClick={add} variant="success">+ Add Party</Btn>
+          {partyError&&<span style={{color:C.red,fontSize:13,fontWeight:600}}>{partyError}</span>}
+        </div>
+      </div>
+
+      {editId&&editForm&&(
+        <Modal title="✏ Edit Party" onClose={()=>{setEditId(null);setEditForm(null);}}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <Field label="Party Name"><input value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))} style={sh.input}/></Field>
+            <Field label="Type">
+              <select value={editForm.partyType} onChange={e=>setEditForm(f=>({...f,partyType:e.target.value}))} style={sh.input}>
+                <option value="supplier">Supplier</option><option value="customer">Customer</option>
+              </select>
+            </Field>
+            <Field label="Phone"><input value={editForm.phone} onChange={e=>setEditForm(f=>({...f,phone:e.target.value}))} style={sh.input}/></Field>
+            <Field label="Address"><input value={editForm.address} onChange={e=>setEditForm(f=>({...f,address:e.target.value}))} style={sh.input}/></Field>
+            <div style={{display:"flex",gap:8,marginTop:4}}><Btn onClick={saveEdit} variant="success">✓ Save</Btn><Btn onClick={()=>{setEditId(null);setEditForm(null);}} variant="ghost">Cancel</Btn></div>
+          </div>
+        </Modal>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))",gap:14}}>
+        {parties.length===0?(
+          <div style={{...sh.card,color:C.muted,textAlign:"center",padding:40}}>No parties added yet</div>
+        ):parties.map(p=>{
+          const acc=state.accounts[p.id];
+          const bal=acc?.balance||0;
+          const txnCount=state.vouchers.filter(v=>v.entries.some(e=>e.accountId===p.id)).length;
+          return(
+            <div key={p.id} style={sh.card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:800,fontSize:16}}>{p.name}</div>
+                  <span style={{fontSize:11,fontWeight:700,color:p.partyType==="customer"?C.blue:C.gold,textTransform:"uppercase"}}>{p.partyType}</span>
+                  {p.phone&&<div style={{fontSize:12,color:C.muted,marginTop:4}}>📞 {p.phone}</div>}
+                  {p.address&&<div style={{fontSize:12,color:C.muted}}>📍 {p.address}</div>}
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:balColor(acc||{type:"asset",balance:bal})}}>{fmt(Math.abs(bal))}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{bal>0?"🟢 Dr":"🔴 Cr"}</div>
+                </div>
+              </div>
+              <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:12,color:C.muted}}>{txnCount} voucher{txnCount!==1?"s":""}</span>
+                <div style={{display:"flex",gap:6}}>
+                  <Btn size="sm" variant="outline" onClick={()=>startEdit(p)}>✏ Edit</Btn>
+                  <Btn size="sm" variant="danger" onClick={async()=>{
+                    try { await dispatch({type:"DELETE_PARTY",id:p.id}); }
+                    catch(e) { setPartyError(e.message); }
+                  }}>🗑</Btn>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── STOCK ITEMS MASTER ────────────────────────────────────────────
+function StockView({ state, dispatch }) {
+  const [newItem,setNewItem]=useState("");
+  const [editName,setEditName]=useState(null);
+  const [editVal,setEditVal]=useState("");
+  const stockItems=state.stockItems||DEFAULT_COFFEE_ITEMS;
+
+  const addItem=()=>{
+    if(!newItem.trim()) return;
+    dispatch({type:"ADD_STOCK_ITEM",name:newItem.trim()});
+    setNewItem("");
+  };
+  const saveEdit=()=>{
+    if(!editVal.trim()) return;
+    dispatch({type:"EDIT_STOCK_ITEM",oldName:editName,newName:editVal.trim()});
+    setEditName(null);setEditVal("");
+  };
+
+  const stockBalances = state.stock || {};
+  // Combine: stock items master + coffee types from Masters + grades + actual stock
+  const masterItems = [
+    ...(state.coffeeTypes?.map(c=>c.name)||[]),
+    "Grade AA","Grade A","Grade B","Grade C","Grade PB","Grade BBB","Bits","Coffee Rice (Bulk)",
+  ];
+  const allItems = new Set([
+    ...masterItems,
+    ...Object.keys(stockBalances).filter(k => (stockBalances[k]||0) > 0),
+  ]);
+  const itemsWithStock = [...allItems].sort();
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>☕ Stock</h2>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"start"}}>
+
+        {/* Stock Register */}
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{background:C.accent,color:"#fff",padding:"12px 16px",fontWeight:800,fontSize:14}}>📦 Stock Register</div>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <thead><tr style={{background:"#f5ede4"}}>
+              <th style={sh.th}>Item / Grade</th>
+              <th style={{...sh.th,textAlign:"right"}}>On Hand</th>
+              <th style={{...sh.th,textAlign:"right"}}>In (GRN+Purchase)</th>
+              <th style={{...sh.th,textAlign:"right"}}>Out (Sales)</th>
+            </tr></thead>
+            <tbody>
+              {itemsWithStock.length===0?(
+                <tr><td colSpan={4} style={{...sh.td,textAlign:"center",color:C.muted,padding:30}}>No stock movements yet</td></tr>
+              ):itemsWithStock.map(item=>{
+                const qty = stockBalances[item] || 0;
+                const DRYING_OUT = {"Wet Parchment":"Parchment","Raw Cherry":"Dry Cherry","wet parchment":"Parchment","raw cherry":"Dry Cherry"};
+                const hulledGrnIds = new Set((state.hullingJobs||[]).map(h=>h.grnId).filter(Boolean));
+                const grnIn = (state.grns||[]).reduce((s,g)=>{
+                  const dryKg  = parseFloat(g.dryKg||0);
+                  const hasDry = g.hasDrying===true||g.hasDrying==="true"||g.hasDrying===1;
+                  const ct     = (g.coffeeType||"").trim();
+                  if (hasDry && dryKg>0) {
+                    const outputType = g.outputType?.trim()||DRYING_OUT[ct]||ct;
+                    // If this GRN has been hulled, don't count parchment in stock
+                    if (hulledGrnIds.has(g.id)) return s;
+                    if (outputType===item) return s+dryKg;
+                    return s;
+                  } else {
+                    // If this GRN has been hulled, don't count in stock
+                    if (hulledGrnIds.has(g.id)) return s;
+                    if (ct===item) return s+parseFloat(g.netWeight||0);
+                    return s;
+                  }
+                },0);
+                const purIn = state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="PuV").flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
+                const sold = state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="SV").flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
+                const totalIn = grnIn + purIn;
+                // Only show rows with actual movements
+                if (totalIn===0 && sold===0 && qty===0) return null;
+                return(
+                  <tr key={item}>
+                    <td style={{...sh.td,fontWeight:700}}>{item}</td>
+                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:qty>0?C.green:qty<0?C.red:C.muted}}>{fmtQ(qty)} kg</td>
+                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.blue}}>{fmtQ(totalIn)} kg</td>
+                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red}}>{fmtQ(sold)} kg</td>
+                  </tr>
+                );
+              }).filter(Boolean)}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Items Master */}
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{background:C.accent,color:"#fff",padding:"12px 16px",fontWeight:800,fontSize:14}}>🗂 Manage Stock Items</div>
+          <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:8}}>
+            <input value={newItem} onChange={e=>setNewItem(e.target.value)} placeholder="New item name" style={{...sh.input,flex:1}}
+              onKeyDown={e=>e.key==="Enter"&&addItem()}/>
+            <Btn onClick={addItem} variant="success" size="sm">+ Add</Btn>
+          </div>
+          <div style={{overflowY:"auto",maxHeight:400}}>
+            {stockItems.map(item=>(
+              <div key={item} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:`1px solid ${C.border}`}}>
+                {editName===item?(
+                  <>
+                    <input value={editVal} onChange={e=>setEditVal(e.target.value)} style={{...sh.input,flex:1}} autoFocus onKeyDown={e=>{if(e.key==="Enter")saveEdit();if(e.key==="Escape"){setEditName(null);setEditVal("");}}}/>
+                    <Btn size="sm" variant="success" onClick={saveEdit}>✓</Btn>
+                    <Btn size="sm" variant="ghost" onClick={()=>{setEditName(null);setEditVal("");}}>✕</Btn>
+                  </>
+                ):(
+                  <>
+                    <span style={{flex:1,fontSize:13,color:C.text}}>{item}</span>
+                    <span style={{fontSize:11,fontFamily:"monospace",color:C.muted}}>{fmtQ(stockBalances[item]||0)} kg</span>
+                    <button onClick={()=>{setEditName(item);setEditVal(item);}} style={{background:"none",border:"none",cursor:"pointer",color:C.blue,fontSize:13,fontFamily:"inherit",fontWeight:600}}>✏</button>
+                    <button onClick={()=>dispatch({type:"DELETE_STOCK_ITEM",name:item})} style={{background:"none",border:"none",cursor:"pointer",color:C.red,fontSize:13}}>🗑</button>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── ACCOUNTS MASTER ───────────────────────────────────────────────
+function AccountsMaster({ state, dispatch }) {
+  const [form,setForm]=useState({name:"",group:"Expenses",type:"expense"});
+  const [bankForm,setBankForm]=useState({name:"",accountNo:"",ifsc:"",branch:""});
+  const [bankError,setBankError]=useState("");
+  const groups=["Cash & Bank","Debtors","Creditors","Income","Expenses","Capital","Other"];
+  const typeMap={"Cash & Bank":"asset",Debtors:"asset",Creditors:"liability",Income:"income",Expenses:"expense",Capital:"liability",Other:"asset"};
+
+  const addBank=()=>{
+    if(!bankForm.name.trim()){ setBankError("Enter bank account name"); return; }
+    setBankError("");
+    const id="bank_"+Date.now();
+    dispatch({type:"ADD_ACCOUNT",data:{
+      name:bankForm.name.trim(),group:"Cash & Bank",type:"asset",
+      isBankAccount:true,
+      accountNo:bankForm.accountNo,ifsc:bankForm.ifsc,branch:bankForm.branch,
+    }});
+    setBankForm({name:"",accountNo:"",ifsc:"",branch:""});
+  };
+
+  const add=()=>{
+    if(!form.name.trim()) return;
+    dispatch({type:"ADD_ACCOUNT",data:{...form,name:form.name.trim()}});
+    setForm(f=>({...f,name:""}));
+  };
+
+  const allAccounts=Object.values(state.accounts).filter(a=>!a.isParty)
+    .sort((a,b)=>(a.group||"").localeCompare(b.group||"")||a.name.localeCompare(b.name));
+  const bankAccounts=allAccounts.filter(a=>a.group==="Cash & Bank");
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>🗂 Chart of Accounts</h2>
+
+      {/* Bank accounts section */}
+      <div style={sh.card}>
+        <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>🏦 Add Bank Account</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+          <Field label="Bank Account Name"><input value={bankForm.name} onChange={e=>setBankForm(f=>({...f,name:e.target.value}))} placeholder="e.g. SBI Current A/C" style={sh.input}/></Field>
+          <Field label="Account Number"><input value={bankForm.accountNo} onChange={e=>setBankForm(f=>({...f,accountNo:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+          <Field label="IFSC Code"><input value={bankForm.ifsc} onChange={e=>setBankForm(f=>({...f,ifsc:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+          <Field label="Branch"><input value={bankForm.branch} onChange={e=>setBankForm(f=>({...f,branch:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+        </div>
+        <div style={{marginTop:14,display:"flex",alignItems:"center",gap:12}}>
+          <Btn onClick={addBank} variant="success">+ Add Bank Account</Btn>
+          {bankError&&<span style={{color:C.red,fontSize:13,fontWeight:600}}>{bankError}</span>}
+        </div>
+      </div>
+
+      {/* Bank accounts list */}
+      {bankAccounts.length>0&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
+          {bankAccounts.map(a=>(
+            <div key={a.id} style={{...sh.card,borderLeft:`4px solid ${C.blue}`}}>
+              <div style={{fontSize:20,marginBottom:4}}>{a.id==="cash"?"💵":"🏦"}</div>
+              <div style={{fontWeight:800,fontSize:15,color:C.text}}>{a.name}</div>
+              {a.accountNo&&<div style={{fontSize:12,color:C.muted,marginTop:2}}>A/C: {a.accountNo}</div>}
+              {a.ifsc&&<div style={{fontSize:12,color:C.muted}}>IFSC: {a.ifsc}</div>}
+              {a.branch&&<div style={{fontSize:12,color:C.muted}}>Branch: {a.branch}</div>}
+              <div style={{marginTop:8,fontFamily:"monospace",fontWeight:800,fontSize:17,color:balColor(a)}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
+              {a.id!=="cash"&&(
+                <div style={{marginTop:8}}>
+                  <Btn size="sm" variant="danger" onClick={async()=>{
+                    try { await dispatch({type:"DELETE_ACCOUNT",id:a.id}); }
+                    catch(e) { setBankError(e.message); }
+                  }}>🗑 Delete</Btn>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* General ledger account add */}
+      <div style={sh.card}>
+        <div style={{fontWeight:800,color:C.accent,marginBottom:12,fontSize:15}}>➕ Add Other Account</div>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr auto",gap:12,alignItems:"flex-end"}}>
+          <Field label="Account Name"><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Office Rent" style={sh.input}/></Field>
+          <Field label="Group"><select value={form.group} onChange={e=>setForm(f=>({...f,group:e.target.value,type:typeMap[e.target.value]||"asset"}))} style={sh.input}>{groups.map(g=><option key={g} value={g}>{g}</option>)}</select></Field>
+          <Field label="Type"><select value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))} style={sh.input}><option value="asset">Asset</option><option value="liability">Liability</option><option value="income">Income</option><option value="expense">Expense</option></select></Field>
+          <Btn onClick={add} variant="success">+ Add</Btn>
+        </div>
+      </div>
+
+      {/* Full accounts table */}
+      <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead><tr style={{background:"#f5ede4"}}>
+            <th style={sh.th}>Account Name</th><th style={sh.th}>Group</th>
+            <th style={sh.th}>Details</th><th style={sh.th}>Type</th>
+            <th style={{...sh.th,textAlign:"right"}}>Balance</th>
+          </tr></thead>
+          <tbody>{allAccounts.map(a=>(
+            <tr key={a.id}>
+              <td style={{...sh.td,fontWeight:600}}>{a.name}</td>
+              <td style={sh.td}><span style={{background:"#f0e8de",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700,color:C.muted}}>{a.group}</span></td>
+              <td style={{...sh.td,fontSize:12,color:C.muted}}>{a.accountNo?`A/C: ${a.accountNo}`:""}{a.ifsc?` · ${a.ifsc}`:""}</td>
+              <td style={{...sh.td,textTransform:"capitalize",fontSize:12,color:C.muted}}>{a.type}</td>
+              <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:balColor(a)}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── TRIAL BALANCE ─────────────────────────────────────────────────
+function TrialBalance({ state }) {
+  // Compute balances fresh from vouchers — don't rely on DB balance
+  const computedBalances = useMemo(() => {
+    const bal = {};
+    state.vouchers.forEach(v => {
+      (v.entries||[]).forEach(e => {
+        if (!e.accountId) return;
+        const acc = state.accounts[e.accountId];
+        if (!acc) return; // account not loaded yet
+        const dr = parseFloat(e.dr||0), cr = parseFloat(e.cr||0);
+        const isDebitNormal = ["asset","expense"].includes(acc.type);
+        const delta = isDebitNormal ? dr-cr : cr-dr;
+        bal[e.accountId] = (bal[e.accountId]||0) + delta;
+      });
+    });
+    return bal;
+  }, [state.vouchers, state.accounts]);
+
+  // Build accounts list — include ALL accounts with non-zero computed balance
+  // Also include accounts that exist in state.accounts regardless (to catch any missed)
+  const allAccountMap = { ...state.accounts };
+  const accounts = Object.values(allAccountMap)
+    .map(a => ({ ...a, computedBalance: computedBalances[a.id]||0 }))
+    .filter(a => a.computedBalance !== 0)
+    .sort((a,b) => (a.group||"").localeCompare(b.group||"")||a.name.localeCompare(b.name));
+
+  const tbDrC = a => {
+    // For asset/expense: positive balance = Dr
+    // For liability/income/capital: negative balance = Dr (abnormal)
+    const isDebitNormal = ["asset","expense"].includes(a.type);
+    return isDebitNormal
+      ? (a.computedBalance>0 ? a.computedBalance : 0)
+      : (a.computedBalance<0 ? Math.abs(a.computedBalance) : 0);
+  };
+  const tbCrC = a => {
+    // For liability/income/capital: positive balance = Cr
+    // For asset/expense: negative balance = Cr (abnormal)
+    const isDebitNormal = ["asset","expense"].includes(a.type);
+    return isDebitNormal
+      ? (a.computedBalance<0 ? Math.abs(a.computedBalance) : 0)
+      : (a.computedBalance>0 ? a.computedBalance : 0);
+  };
+
+  const totalDr = accounts.reduce((s,a)=>s+tbDrC(a),0);
+  const totalCr = accounts.reduce((s,a)=>s+tbCrC(a),0);
+  const balanced = Math.abs(totalDr-totalCr)<0.01;
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+        <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>⚖️ Trial Balance</h2>
+        <span style={{fontWeight:800,fontSize:13,color:balanced?C.green:C.red,background:balanced?"#dcfce7":"#fee2e2",padding:"4px 14px",borderRadius:20}}>
+          {balanced?"✓ Books Balanced":"⚠ Out of Balance"}
+        </span>
+      </div>
+      <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead><tr style={{background:"#f5ede4"}}>
+            <th style={sh.th}>Account</th>
+            <th style={sh.th}>Group</th>
+            <th style={{...sh.th,textAlign:"right"}}>Debit (₹)</th>
+            <th style={{...sh.th,textAlign:"right"}}>Credit (₹)</th>
+          </tr></thead>
+          <tbody>
+            {accounts.length===0?(
+              <tr><td colSpan={4} style={{...sh.td,textAlign:"center",color:C.muted,padding:40}}>No transactions posted yet</td></tr>
+            ):accounts.map(a=>{
+              const dr=tbDrC(a), cr=tbCrC(a);
+              return(
+                <tr key={a.id}>
+                  <td style={{...sh.td,fontWeight:600}}>{a.name}</td>
+                  <td style={{...sh.td,fontSize:12,color:C.muted}}>{a.group}</td>
+                  <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.blue,fontWeight:600}}>{dr>0?fmt(dr):"—"}</td>
+                  <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red,fontWeight:600}}>{cr>0?fmt(cr):"—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot><tr style={{background:"#f5ede4"}}>
+            <td colSpan={2} style={{padding:"10px 12px",fontWeight:800}}>TOTAL</td>
+            <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(totalDr)}</td>
+            <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(totalCr)}</td>
+          </tr></tfoot>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── USER MANAGEMENT ───────────────────────────────────────────────
+function UserManagement({ state, dispatch, currentUser }) {
+  const [form,setForm]=useState({username:"",password:"",name:"",role:"accountant"});
+  const [editId,setEditId]=useState(null);
+  const [editForm,setEditForm]=useState(null);
+  const [userError,setUserError]=useState("");
+
+  const add=()=>{
+    if(!form.username.trim()||!form.password.trim()||!form.name.trim()){ setUserError("Fill all fields"); return; }
+    if(state.users.find(u=>u.username===form.username.trim())){ setUserError("Username already exists"); return; }
+    dispatch({type:"ADD_USER",data:{...form,username:form.username.trim(),name:form.name.trim()}});
+    setForm({username:"",password:"",name:"",role:"accountant"});
+  };
+  const startEdit=u=>{setEditId(u.id);setEditForm({name:u.name,password:u.password,role:u.role});};
+  const saveEdit=()=>{dispatch({type:"EDIT_USER",id:editId,data:editForm});setEditId(null);setEditForm(null);};
+  const deleteUser=id=>{
+    if(id===currentUser.id) return;
+    dispatch({type:"DELETE_USER",id});
+  };
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>👤 User Management</h2>
+      <div style={sh.card}>
+        <div style={{fontWeight:700,color:C.accent,marginBottom:12}}>Add New User</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12}}>
+          <Field label="Full Name"><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Rajan Kumar" style={sh.input}/></Field>
+          <Field label="Username"><input value={form.username} onChange={e=>setForm(f=>({...f,username:e.target.value}))} placeholder="e.g. rajan" style={sh.input}/></Field>
+          <Field label="Password"><input type="password" value={form.password} onChange={e=>setForm(f=>({...f,password:e.target.value}))} placeholder="••••••" style={sh.input}/></Field>
+          <Field label="Role">
+            <select value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))} style={sh.input}>
+              <option value="admin">Admin (Full Access)</option>
+              <option value="accountant">Accountant (No Delete)</option>
+              <option value="viewer">View Only</option>
+            </select>
+          </Field>
+        </div>
+        <div style={{marginTop:14,display:"flex",alignItems:"center",gap:12}}>
+          <Btn onClick={add} variant="success">+ Add User</Btn>
+          {userError&&<span style={{color:C.red,fontSize:13,fontWeight:600}}>{userError}</span>}
+        </div>
+      </div>
+
+      {editId&&editForm&&(
+        <Modal title="✏ Edit User" onClose={()=>{setEditId(null);setEditForm(null);}}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <Field label="Full Name"><input value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))} style={sh.input}/></Field>
+            <Field label="New Password"><input type="password" value={editForm.password} onChange={e=>setEditForm(f=>({...f,password:e.target.value}))} style={sh.input}/></Field>
+            <Field label="Role">
+              <select value={editForm.role} onChange={e=>setEditForm(f=>({...f,role:e.target.value}))} style={sh.input}>
+                <option value="admin">Admin</option><option value="accountant">Accountant</option><option value="viewer">View Only</option>
+              </select>
+            </Field>
+            <div style={{display:"flex",gap:8,marginTop:4}}><Btn onClick={saveEdit} variant="success">✓ Save</Btn><Btn onClick={()=>{setEditId(null);setEditForm(null);}} variant="ghost">Cancel</Btn></div>
+          </div>
+        </Modal>
+      )}
+
+      <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead><tr style={{background:"#f5ede4"}}><th style={sh.th}>Name</th><th style={sh.th}>Username</th><th style={sh.th}>Role</th><th style={sh.th}>Actions</th></tr></thead>
+          <tbody>{state.users.map(u=>(
+            <tr key={u.id} style={{background:u.id===currentUser.id?"#fdf0e8":C.surface}}>
+              <td style={{...sh.td,fontWeight:600}}>{u.name} {u.id===currentUser.id&&<span style={{fontSize:11,color:C.accent,fontWeight:700}}>(you)</span>}</td>
+              <td style={sh.td}><span style={{fontFamily:"monospace",fontSize:12}}>{u.username}</span></td>
+              <td style={sh.td}><span style={{background:u.role==="admin"?C.accent+"22":u.role==="accountant"?"#eff6ff":"#f0fdf4",color:u.role==="admin"?C.accent:u.role==="accountant"?C.blue:C.green,padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:700}}>{ROLES[u.role]?.label}</span></td>
+              <td style={sh.td}>
+                <div style={{display:"flex",gap:6}}>
+                  <Btn size="sm" variant="outline" onClick={()=>startEdit(u)}>✏ Edit</Btn>
+                  {u.id!==currentUser.id&&<Btn size="sm" variant="danger" onClick={()=>deleteUser(u.id)}>🗑</Btn>}
+                </div>
+              </td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── DASHBOARD ─────────────────────────────────────────────────────
+function Dashboard({ state }) {
+  const cash=state.accounts["cash"]?.balance||0;
+  const bankAccounts=Object.values(state.accounts).filter(a=>a.group==="Cash & Bank"&&a.id!=="cash");
+  const totalBank=bankAccounts.reduce((s,a)=>s+a.balance,0);
+  const parties=Object.values(state.parties);
+  const receivable=parties.reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
+  const payable=parties.reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b<0?s+Math.abs(b):s;},0);
+  const todayVouchers=state.vouchers.filter(v=>v.date===today());
+  const stockItems=Object.entries(state.stock||{}).filter(([,q])=>q>0);
+  const incomeAccs=Object.values(state.accounts).filter(a=>a.type==="income");
+  const expenseAccs=Object.values(state.accounts).filter(a=>a.type==="expense");
+  const totalIncome=incomeAccs.reduce((s,a)=>s+a.balance,0);
+  const totalExpense=expenseAccs.reduce((s,a)=>s+a.balance,0);
+  const netProfit=totalIncome-totalExpense;
+
+  const Stat=({icon,label,value,color,sub})=>(
+    <div style={{...sh.card,flex:1,minWidth:150}}>
+      <div style={{fontSize:22,marginBottom:4}}>{icon}</div>
+      <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{label}</div>
+      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:color||C.text,marginTop:4}}>{value}</div>
+      {sub&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>{sub}</div>}
+    </div>
+  );
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div>
+        <h2 style={{margin:0,color:C.text,fontSize:24,fontWeight:800}}>☕ Coffee Vel International</h2>
+        <p style={{margin:"3px 0 0",color:C.muted,fontSize:13}}>Pattiveeranpatti · Dashboard · {today()}</p>
+      </div>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        <Stat icon="💵" label="Cash in Hand"  value={fmt(cash)}       color={cash>=0?C.green:C.red}/>
+        <Stat icon="🏦" label="Bank Balance"  value={fmt(totalBank)}  color={totalBank>=0?C.green:C.red} sub={bankAccounts.length>1?`${bankAccounts.length} accounts`:bankAccounts[0]?.name||"No bank added"}/>
+        <Stat icon="📥" label="Receivable"    value={fmt(receivable)} color={C.blue} sub="Customers owe us"/>
+        <Stat icon="📤" label="Payable"       value={fmt(payable)}    color={C.red}  sub="We owe suppliers"/>
+        <Stat icon={netProfit>=0?"✅":"⚠️"} label={netProfit>=0?"Net Profit":"Net Loss"} value={fmt(Math.abs(netProfit))} color={netProfit>=0?C.green:C.red}/>
+        <Stat icon="📓" label="Vouchers"      value={state.vouchers.length} sub={`${todayVouchers.length} today`}/>
+        <Stat icon="📋" label="Purchase GRNs" value={state.grns.length} sub={state.grns.filter(g=>!g.qualityReport).length+" QC pending"}/>
+      </div>
+      {bankAccounts.length>1&&(
+        <div style={sh.card}>
+          <div style={{fontWeight:800,marginBottom:10}}>🏦 Bank Accounts</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            {bankAccounts.map(a=>(
+              <div key={a.id} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 16px",minWidth:180}}>
+                <div style={{fontSize:12,fontWeight:700,color:C.muted}}>{a.name}</div>
+                {a.accountNo&&<div style={{fontSize:11,color:C.muted}}>A/C: {a.accountNo}</div>}
+                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:balColor(a),marginTop:4}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {stockItems.length>0&&(
+        <div style={sh.card}>
+          <div style={{fontWeight:800,marginBottom:10}}>☕ Stock on Hand</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            {stockItems.map(([item,qty])=>(
+              <div key={item} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px"}}>
+                <div style={{fontSize:12,fontWeight:700,color:C.accent}}>{item}</div>
+                <div style={{fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmtQ(qty)} kg</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {todayVouchers.length>0&&(
+        <div style={sh.card}>
+          <div style={{fontWeight:800,marginBottom:10}}>📅 Today's Entries</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {todayVouchers.map(v=>{
+              const amt=v.entries.reduce((s,e)=>s+parseFloat(e.dr||0),0);
+              return(<div key={v.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 10px",background:C.cream,borderRadius:8,flexWrap:"wrap"}}>
+                <VBadge type={v.voucherType}/>
+                <span style={{fontSize:12,color:C.muted,minWidth:90}}>{v.id}</span>
+                <span style={{flex:1,fontSize:13}}>{v.narration||"—"}</span>
+                <span style={{fontFamily:"monospace",fontWeight:700,color:C.accent}}>{fmt(amt)}</span>
+              </div>);
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── LOGIN ─────────────────────────────────────────────────────────
+function LoginForm({ onLogin, loading, error }) {
+  const [username,setUsername]=useState("");
+  const [password,setPassword]=useState("");
+
+  const login=()=>onLogin(username,password);
+
+  return(
+      <div style={{background:C.surface,borderRadius:16,padding:"40px 36px",width:"100%",maxWidth:380,boxShadow:"0 20px 60px #00000044"}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{fontSize:48,marginBottom:8}}>☕</div>
+          <div style={{fontSize:22,fontWeight:800,color:C.accent}}>Coffee Vel International</div>
+          <div style={{fontSize:12,color:C.muted,marginTop:4,letterSpacing:1,textTransform:"uppercase"}}>Accounting System</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <Field label="Username">
+            <input value={username} onChange={e=>setUsername(e.target.value)} placeholder="Enter username" style={sh.input} onKeyDown={e=>e.key==="Enter"&&login()} autoFocus/>
+          </Field>
+          <Field label="Password">
+            <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Enter password" style={sh.input} onKeyDown={e=>e.key==="Enter"&&login()}/>
+          </Field>
+          {error&&<div style={{color:C.red,fontSize:13,fontWeight:600,textAlign:"center",background:"#fee2e2",padding:"8px",borderRadius:6}}>{error}</div>}
+          <Btn onClick={login} variant="primary" size="lg" disabled={loading}>{loading?"Signing in…":"Sign In →"}</Btn>
+        </div>
+      </div>
+  );
+}
+
+// ── GRN MODULE ────────────────────────────────────────────────────
+const COFFEE_TYPES_GRN = [
+  "AP Raw","Wet Parchment","Parchment","Dry Cherry","Cherry",
+  "Clean Coffee","AB Raw","PB Raw","Robusta",
+];
+const LOCATIONS = ["Pattiveeranpatti","Yercaud"];
+const WAREHOUSES = ["Own Yard","Mechanical Dryer","LDC Kushalnagar","LDC Koppa","Other"];
+
+// ── COFFEE TYPE HELPERS ───────────────────────────────────────────
+
+// unit/paka display helper
+const fmtUnits = (units, paka) => {
+  const u = parseInt(units||0), p = parseInt(paka||0);
+  if (!u && !p) return "—";
+  if (!p) return `${u} units`;
+  return `${u} units ${p} paka`;
+};
+
+// ── GRN FORM ──────────────────────────────────────────────────────
+// ── GRN CONSTANTS ─────────────────────────────────────────────────
+const GRN_COFFEE_TYPES = [
+  "Wet Parchment",
+  "Raw Cherry",
+  "Parchment",
+  "Dry Cherry",
+  "Others",
+];
+const UNIT_MEASURE_TYPES = ["Wet Parchment","Raw Cherry"]; // can be kg or units+paka
+const DRYING_TYPES       = ["Wet Parchment","Raw Cherry"]; // drying enabled
+const QUALITY_TYPES      = ["Parchment","Dry Cherry","Others"]; // quality report required
+const OUTPUT_MAP         = { "Wet Parchment":"Parchment", "Raw Cherry":"Dry Cherry" };
+
+const isUnitType  = ct => UNIT_MEASURE_TYPES.includes(ct);
+const needsDrying = ct => DRYING_TYPES.includes(ct);
+const needsQuality = ct => QUALITY_TYPES.includes(ct);
+const needsQualityForGRN = (g) => {
+  if (QUALITY_TYPES.includes(g.coffeeType)) return true;
+  if ((g.hasDrying===true||g.hasDrying==="true") && parseFloat(g.dryKg||0)>0) return true;
+  return false;
+};
+
+// ── GRN FORM ──────────────────────────────────────────────────────
+function GRNForm({ state, dispatch, onDone, initial, editId }) {
+  const locationsList  = state.locations?.length  ? state.locations.map(l=>l.name)  : ["Pattiveeranpatti","Yercaud"];
+  const warehousesList = state.warehouses?.length ? state.warehouses.map(w=>w.name) : ["Own Yard","Mechanical Dryer"];
+  const suppliers      = Object.values(state.parties).filter(p=>p.partyType==="supplier");
+
+  const blank = {
+    date:today(), partyId:"", coffeeType:"Wet Parchment",
+    totalBags:"",                  // MANDATORY
+    bagType:"PP Bags",
+    // unit measure (wet parchment / raw cherry only)
+    inputMode:"kg",                // "kg" | "unit"
+    noOfUnits:"", noOfPaka:"",
+    // weight bridge
+    firstWeight:"", secondWeight:"", rejectedBags:"",
+    // location
+    location:locationsList[0]||"Pattiveeranpatti",
+    warehouse:warehousesList[0]||"Own Yard",
+    warehouseZone:"", stockNo:"", truckNo:"", cropSeason:"25/26",
+    remarks:"", narration:"",
+    // grn type
+    grnType:"purchase",            // "purchase" | "storage" | "both"
+    // drying (wet parchment / raw cherry only)
+    hasDrying:false,
+    dryingMethod:"Yard",
+    dryKg:"",
+    priceBasis:"wet",              // "wet"=price on wet, "dry"=price on dry
+    dryingRate:"", dryingCharge:"",
+    // purchase rate
+    rateType:"per_kg",             // "per_kg" | "per_paka"
+    rate:"", ratePending:false,
+    // split: purchase + storage portions
+    purchaseQtyKg:"", storageQtyKg:"",
+  };
+
+  const [form, setForm] = useState(() => {
+    if (!initial) return blank;
+    return { ...blank, ...initial,
+      totalBags:    initial.totalBags    || initial.noOfBags || "",
+      inputMode:    initial.inputMode    || "kg",
+      noOfUnits:    initial.noOfUnits    || "",
+      noOfPaka:     initial.noOfPaka     || "",
+      hasDrying:    initial.hasDrying    || false,
+      priceBasis:   initial.priceBasis   || "wet",
+      grnType:      initial.grnType      || "purchase",
+    };
+  });
+  const [err, setErr] = useState("");
+
+  const set = (f, v) => setForm(p => {
+    const next = { ...p, [f]: v };
+    // Auto-set dryingMethod based on warehouse
+    if (f==="warehouse" && v==="Mechanical Dryer") next.dryingMethod = "Mechanical";
+    // Auto-reset inputMode when coffee type changes
+    if (f==="coffeeType" && !isUnitType(v)) next.inputMode = "kg";
+    // Auto-calc drying charge
+    if (["dryKg","dryingRate"].includes(f)) {
+      next.dryingCharge = (parseFloat(f==="dryKg"?v:next.dryKg)||0) * (parseFloat(f==="dryingRate"?v:next.dryingRate)||0);
+    }
+    return next;
+  });
+
+  // Derived weights
+  const fw    = parseFloat(form.firstWeight||0);
+  const sw    = parseFloat(form.secondWeight||0);
+  const rej   = parseFloat(form.rejectedBags||0);
+  const gross = fw>0&&sw>0 ? fw-sw : 0;
+  const netWt = gross>0 ? gross-rej : 0;
+
+  // Unit/paka helpers
+  const totalPaka = parseInt(form.noOfUnits||0)*21 + parseInt(form.noOfPaka||0);
+
+  // Purchase value — use purchaseQtyKg if set, otherwise full netWt
+  const purchaseKg    = parseFloat(form.purchaseQtyKg||0) > 0 ? parseFloat(form.purchaseQtyKg||0) : netWt;
+  const effectiveQty  = purchaseKg;
+  const pricingQty    = form.priceBasis==="dry" ? parseFloat(form.dryKg||0) : effectiveQty;
+  const rate          = parseFloat(form.rate||0);
+  const purchaseValue = form.ratePending ? 0 :
+    form.rateType==="per_paka" ? totalPaka * rate : pricingQty * rate;
+
+  const showDrying    = needsDrying(form.coffeeType) && form.hasDrying;
+
+  const submit = () => {
+    if (!form.partyId)    { setErr("Party is mandatory"); return; }
+    if (!form.totalBags||parseFloat(form.totalBags)<=0) { setErr("Total bags is mandatory"); return; }
+    if (netWt <= 0)       { setErr("Enter weight bridge readings — net weight must be > 0"); return; }
+    if (!form.truckNo.trim()) { setErr("Truck number is required"); return; }
+    const purQty = parseFloat(form.purchaseQtyKg||0);
+    const storQty= parseFloat(form.storageQtyKg||0);
+    if (purQty>0 && storQty>0 && Math.abs(purQty+storQty-netWt)>0.5) {
+      setErr(`Purchase (${purQty}kg) + Storage (${storQty}kg) must equal Net Wt (${netWt.toFixed(2)}kg)`); return;
+    }
+    if (!form.ratePending && !form.rate) { setErr("Enter rate or tick 'Rate Pending'"); return; }
+    setErr("");
+    const grnType = purQty>0&&storQty>0?"both":storQty>0&&purQty===0?"storage":"purchase";
+    const data = {
+      ...form, grnType,
+      grossWeight:gross.toFixed(2), netWeight:netWt.toFixed(2),
+      totalPaka, purchaseValue,
+      outputType: showDrying ? OUTPUT_MAP[form.coffeeType]||"" : "",
+      dryingCharge: showDrying ? parseFloat(form.dryKg||0)*parseFloat(form.dryingRate||0) : 0,
+    };
+    if (editId) dispatch({type:"EDIT_GRN", id:editId, data});
+    else        dispatch({type:"ADD_GRN",  data});
+    onDone();
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:18}}>
+
+      {/* ── SECTION 1: HEADER ── */}
+      <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+        <div style={{background:"#f5ede4",padding:"8px 14px",fontWeight:800,fontSize:12,color:C.accent}}>📋 GRN DETAILS</div>
+        <div style={{padding:"14px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(175px,1fr))",gap:12}}>
+          <Field label="Date *"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
+          <Field label="Party (Supplier) *">
+            <select value={form.partyId} onChange={e=>set("partyId",e.target.value)} style={{...sh.input,borderColor:!form.partyId?"#f97316":C.border}}>
+              <option value="">— Select Party —</option>
+              {suppliers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Coffee Type *">
+            <select value={form.coffeeType} onChange={e=>set("coffeeType",e.target.value)} style={sh.input}>
+              {GRN_COFFEE_TYPES.map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
+          <Field label="Truck Number *"><input value={form.truckNo} onChange={e=>set("truckNo",e.target.value)} placeholder="TN-XX-X-XXXX" style={sh.input}/></Field>
+          <Field label="Crop Season"><input value={form.cropSeason} onChange={e=>set("cropSeason",e.target.value)} placeholder="25/26" style={sh.input}/></Field>
+          <Field label="Total Bags *">
+            <input type="number" value={form.totalBags} onChange={e=>set("totalBags",e.target.value)} placeholder="0" style={{...sh.input,borderColor:!form.totalBags?"#f97316":C.border}}/>
+          </Field>
+          <Field label="Bag Type">
+            <select value={form.bagType} onChange={e=>set("bagType",e.target.value)} style={sh.input}>
+              <option>PP Bags</option><option>Jute Bags</option><option>Both</option>
+            </select>
+          </Field>
+          <Field label="Location">
+            <select value={form.location} onChange={e=>set("location",e.target.value)} style={sh.input}>
+              {locationsList.map(l=><option key={l} value={l}>{l}</option>)}
+            </select>
+          </Field>
+          <Field label="Narration"><input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+        </div>
+      </div>
+
+      {/* ── SECTION 2: UNIT MEASURE (wet parchment / raw cherry only) ── */}
+      {isUnitType(form.coffeeType)&&(
+        <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+          <div style={{background:"#fdf4ff",padding:"8px 14px",display:"flex",gap:12,alignItems:"center"}}>
+            <span style={{fontWeight:800,fontSize:12,color:"#7c3aed"}}>📦 UNIT OF MEASUREMENT</span>
+            <div style={{display:"flex",gap:6}}>
+              {[["kg","KG (weighbridge)"],["unit","Units + Paka"]].map(([v,l])=>(
+                <button key={v} onClick={()=>set("inputMode",v)} style={{padding:"3px 12px",borderRadius:20,border:`1px solid ${form.inputMode===v?"#7c3aed":C.border}`,background:form.inputMode===v?"#7c3aed":"transparent",color:form.inputMode===v?"#fff":C.muted,fontWeight:600,fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>{l}</button>
+              ))}
+            </div>
+          </div>
+          {form.inputMode==="unit"&&(
+            <div style={{padding:"12px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12}}>
+              <Field label="No. of Units"><input type="number" value={form.noOfUnits} onChange={e=>set("noOfUnits",e.target.value)} placeholder="0" style={sh.input}/></Field>
+              <Field label="Extra Paka"><input type="number" value={form.noOfPaka} onChange={e=>set("noOfPaka",e.target.value)} placeholder="0" style={sh.input}/></Field>
+              {totalPaka>0&&(
+                <div style={{padding:"10px 14px",background:"#f5f0ff",borderRadius:6,alignSelf:"flex-end"}}>
+                  <div style={{fontSize:11,color:"#7c3aed"}}>Total Paka</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:"#7c3aed"}}>{totalPaka}</div>
+                  <div style={{fontSize:10,color:C.muted}}>{form.noOfUnits||0} × 21 + {form.noOfPaka||0}</div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SECTION 3: WEIGHT BRIDGE ── */}
+      <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+        <div style={{background:"#f5ede4",padding:"8px 14px",fontWeight:800,fontSize:12,color:C.accent}}>⚖️ WEIGHT BRIDGE (always in kg)</div>
+        <div style={{padding:"14px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12}}>
+          <Field label="1st Weight Loaded (kg)"><input type="number" value={form.firstWeight} onChange={e=>set("firstWeight",e.target.value)} placeholder="0" style={sh.input}/></Field>
+          <Field label="2nd Weight Empty (kg)"><input type="number" value={form.secondWeight} onChange={e=>set("secondWeight",e.target.value)} placeholder="0" style={sh.input}/></Field>
+          <Field label="Gross Weight (kg)"><input value={gross>0?gross.toFixed(2):""} readOnly style={{...sh.input,background:"#f0f9ff",fontWeight:700,color:C.blue}}/></Field>
+          <Field label="Deductions (kg)"><input type="number" value={form.rejectedBags} onChange={e=>set("rejectedBags",e.target.value)} placeholder="0" style={sh.input}/></Field>
+          <Field label="Net Weight (kg)">
+            <input value={netWt>0?netWt.toFixed(2):""} readOnly style={{...sh.input,background:"#dcfce7",fontWeight:800,fontSize:15,color:C.green}}/>
+          </Field>
+        </div>
+      </div>
+
+      {/* ── SECTION 4: DRYING (wet parchment / raw cherry only) ── */}
+      {needsDrying(form.coffeeType)&&(
+        <div style={{border:`2px solid ${form.hasDrying?"#f97316":"#e8ddd0"}`,borderRadius:8,overflow:"hidden"}}>
+          <div style={{background:form.hasDrying?"#fff7ed":"#f5ede4",padding:"8px 14px",display:"flex",gap:12,alignItems:"center"}}>
+            <span style={{fontWeight:800,fontSize:12,color:form.hasDrying?"#c2410c":C.muted}}>🌡 DRYING</span>
+            <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:13}}>
+              <input type="checkbox" checked={form.hasDrying} onChange={e=>set("hasDrying",e.target.checked)} style={{width:16,height:16}}/>
+              <span style={{color:form.hasDrying?"#c2410c":C.muted,fontWeight:600}}>{form.hasDrying?"Drying enabled":"Enable drying for this GRN"}</span>
+            </label>
+            {form.hasDrying&&<span style={{fontSize:11,color:"#c2410c",background:"#ffedd5",padding:"2px 8px",borderRadius:10,fontWeight:600}}>→ Converts to {OUTPUT_MAP[form.coffeeType]}</span>}
+          </div>
+          {form.hasDrying&&(
+            <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:14}}>
+              <div style={{padding:"10px 14px",background:"#fff7ed",borderRadius:8,fontSize:13,color:"#c2410c",fontWeight:600}}>
+                ⏳ Drying takes time — dry quantity will be entered separately after drying is complete.
+                <div style={{fontWeight:400,color:"#92400e",marginTop:4,fontSize:12}}>Purchase rate, split, and drying charges will all be calculated on <strong>dry kg</strong>.</div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(175px,1fr))",gap:12}}>
+                <Field label="Drying Method">
+                  <select value={form.dryingMethod} onChange={e=>set("dryingMethod",e.target.value)} style={sh.input}>
+                    <option value="Yard">Yard Drying</option>
+                    <option value="Mechanical">Mechanical Dryer</option>
+                  </select>
+                </Field>
+                <Field label="Drying Rate (₹/kg dry)">
+                  <input type="number" value={form.dryingRate} onChange={e=>set("dryingRate",e.target.value)} placeholder="0.00" style={sh.input}/>
+                </Field>
+                <Field label="Price Basis">
+                  <select value={form.priceBasis} onChange={e=>set("priceBasis",e.target.value)} style={sh.input}>
+                    <option value="wet">On Wet Weight — Drying = Company Expense</option>
+                    <option value="dry">On Dry Weight — Drying = Billed to Party</option>
+                  </select>
+                </Field>
+              </div>
+              <div style={{fontSize:12,color:"#c2410c",background:"#ffedd5",padding:"8px 12px",borderRadius:6}}>
+                {form.priceBasis==="wet"
+                  ? "🔴 Price on WET → Drying charge (dry kg × rate) = COMPANY EXPENSE (Dr Drying A/c, Cr Drying Income)"
+                  : "🟢 Price on DRY → Drying charge (dry kg × rate) = BILLED TO PARTY (Dr Party, Cr Drying Income)"}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SECTION 5: PURCHASE RATE ── */}
+      <div style={{border:`2px solid #22c55e44`,borderRadius:8,overflow:"hidden"}}>
+        <div style={{background:"#f0fdf4",padding:"8px 14px",fontWeight:800,fontSize:12,color:C.green}}>🛒 PURCHASE & STORAGE SPLIT</div>
+        <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:12}}>
+
+          {/* Basis qty info */}
+          {form.hasDrying&&(
+            <div style={{padding:"8px 12px",background:"#fff7ed",borderRadius:6,fontSize:12,color:"#c2410c",fontWeight:600}}>
+              ⚠ Drying enabled — Purchase/storage split and rate will be applied on <strong>dry kg</strong> (entered after drying). Leave split at 0 for now.
+            </div>
+          )}
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(175px,1fr))",gap:12}}>
+            <Field label={`Purchase Qty (kg)${form.hasDrying?" — after drying":""} — Company Owns`}>
+              <input type="number" value={form.purchaseQtyKg} onChange={e=>set("purchaseQtyKg",e.target.value)}
+                placeholder={form.hasDrying?"Enter after drying":"0 = full qty"} style={{...sh.input,borderColor:"#22c55e"}}
+                disabled={form.hasDrying}/>
+            </Field>
+            <Field label={`Storage Qty (kg)${form.hasDrying?" — after drying":""} — Party Owns`}>
+              <input type="number" value={form.storageQtyKg} onChange={e=>set("storageQtyKg",e.target.value)}
+                placeholder={form.hasDrying?"Enter after drying":"0 = none"} style={{...sh.input,borderColor:C.blue}}
+                disabled={form.hasDrying}/>
+            </Field>
+            {!form.hasDrying&&netWt>0&&(
+              <div style={{padding:"10px 14px",background:C.cream,borderRadius:6,alignSelf:"flex-end",fontSize:12}}>
+                <div style={{color:C.muted}}>Net Weight</div>
+                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:C.green}}>{netWt.toFixed(2)} kg</div>
+                {(parseFloat(form.purchaseQtyKg||0)+parseFloat(form.storageQtyKg||0))>0&&(
+                  <div style={{color:Math.abs((parseFloat(form.purchaseQtyKg||0)+parseFloat(form.storageQtyKg||0))-netWt)<0.5?C.green:C.red,fontWeight:600,fontSize:11}}>
+                    Split: {parseFloat(form.purchaseQtyKg||0)+parseFloat(form.storageQtyKg||0)} kg {Math.abs((parseFloat(form.purchaseQtyKg||0)+parseFloat(form.storageQtyKg||0))-netWt)<0.5?"✓":"⚠ must = net wt"}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Rate */}
+          <div style={{borderTop:`1px solid ${C.border}`,paddingTop:12}}>
+            <div style={{fontSize:12,fontWeight:700,color:C.green,marginBottom:10}}>
+              💰 Purchase Rate {form.hasDrying&&<span style={{color:"#c2410c",fontWeight:400}}>(applied on dry kg after drying)</span>}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(175px,1fr))",gap:12}}>
+              <Field label="Rate Type">
+                <select value={form.rateType} onChange={e=>set("rateType",e.target.value)} style={sh.input} disabled={form.ratePending}>
+                  <option value="per_kg">Per KG (₹/kg)</option>
+                  {isUnitType(form.coffeeType)&&<option value="per_paka">Per Paka (₹/paka)</option>}
+                </select>
+              </Field>
+              <Field label={form.rateType==="per_paka"?"Rate per Paka (₹)":"Rate per KG (₹)"}>
+                <input type="number" value={form.rate} onChange={e=>set("rate",e.target.value)} placeholder="0.00"
+                  style={{...sh.input,opacity:form.ratePending?0.4:1}} disabled={form.ratePending}/>
+              </Field>
+            </div>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",marginTop:10}}>
+              <input type="checkbox" checked={form.ratePending} onChange={e=>set("ratePending",e.target.checked)} style={{width:16,height:16}}/>
+              <span style={{fontSize:13,color:C.muted,fontWeight:600}}>Rate Pending — fix & bill later</span>
+            </label>
+            {!form.ratePending&&rate>0&&!form.hasDrying&&pricingQty>0&&(
+              <div style={{padding:"12px 16px",background:"#f0fdf4",borderRadius:8,display:"flex",gap:24,alignItems:"center",flexWrap:"wrap",marginTop:10}}>
+                <div>
+                  <div style={{fontSize:11,color:C.muted}}>Purchase Value</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:C.green}}>{fmt(purchaseValue)}</div>
+                </div>
+                <div style={{fontSize:12,color:C.muted}}>
+                  {form.rateType==="per_paka"?`${totalPaka} paka × ₹${rate}`:`${pricingQty.toFixed(2)} kg × ₹${rate}`}
+                </div>
+                <div style={{fontSize:11,background:"#dcfce7",color:C.green,padding:"4px 10px",borderRadius:8,fontWeight:600}}>
+                  → Auto-posts Purchase voucher to party account
+                </div>
+              </div>
+            )}
+            {form.hasDrying&&rate>0&&(
+              <div style={{padding:"10px 14px",background:"#fff7ed",borderRadius:8,marginTop:10,fontSize:12,color:"#c2410c"}}>
+                Rate ₹{rate}/kg will be applied on dry kg when you enter dry quantity after drying
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── SECTION 6: STORAGE ── */}
+      <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+        <div style={{background:"#f5ede4",padding:"8px 14px",fontWeight:800,fontSize:12,color:C.accent}}>🏭 STORAGE</div>
+        <div style={{padding:"14px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12}}>
+          <Field label="Warehouse">
+            <select value={form.warehouse} onChange={e=>set("warehouse",e.target.value)} style={sh.input}>
+              {warehousesList.map(w=><option key={w} value={w}>{w}</option>)}
+            </select>
+          </Field>
+          <Field label="Zone"><input value={form.warehouseZone} onChange={e=>set("warehouseZone",e.target.value)} placeholder="e.g. Zone 2" style={sh.input}/></Field>
+          <Field label="Stock No."><input value={form.stockNo} onChange={e=>set("stockNo",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+          <Field label="Remarks"><input value={form.remarks} onChange={e=>set("remarks",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+        </div>
+      </div>
+
+      {err&&<div style={{color:C.red,fontWeight:700,fontSize:13,padding:"8px 12px",background:"#fee2e2",borderRadius:6}}>{err}</div>}
+      <div style={{display:"flex",gap:10}}>
+        <Btn onClick={submit} variant="success" size="lg">{editId?"✓ Save Changes":"✓ Save GRN"}</Btn>
+        <Btn onClick={onDone} variant="ghost">Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ── QUALITY REPORT ────────────────────────────────────────────────
+function QRow({ label, value, onChange, color }) {
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${C.border}`}}>
+      <span style={{fontSize:13,color:color||C.text,fontWeight:color?700:400}}>{label}</span>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <input type="number" value={value||""} onChange={onChange} style={{...sh.input,width:80,textAlign:"right"}} placeholder="0"/>
+        <span style={{color:C.muted,fontSize:12,width:14}}>%</span>
+      </div>
+    </div>
+  );
+}
+
+function QualityForm({ grnId, existing, dispatch, onDone }) {
+  const empty = {moisture:"",outturn:"",sc19AAA:"",sc18AA:"",sc17A:"",sc15B:"",sc14C:"",sc13up:"",pb:"",bits:"",bbb:"",idb:"",foreignMatter:"",huskMoisture:"",triage:"",blacks:"",brows:"",comments:""};
+  const [form,setForm] = useState(existing||empty);
+  const set = (f,v) => setForm(p=>({...p,[f]:v}));
+  const totalGrades = ["sc19AAA","sc18AA","sc17A","sc15B","sc14C","sc13up","pb","bits","bbb","idb"].reduce((s,k)=>s+parseFloat(form[k]||0),0);
+  const submit = () => { dispatch({type:"ADD_QUALITY_REPORT",grnId,report:{...form,savedAt:new Date().toISOString()}}); onDone(); };
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <div style={sh.card}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:12}}>📊 Humid & Yield</div>
+          <QRow label="Moisture %"     value={form.moisture}     onChange={e=>set("moisture",e.target.value)}     color={C.blue}/>
+          <QRow label="Outturn %"      value={form.outturn}      onChange={e=>set("outturn",e.target.value)}      color={C.green}/>
+          <QRow label="Husk Moisture %" value={form.huskMoisture} onChange={e=>set("huskMoisture",e.target.value)}/>
+        </div>
+        <div style={sh.card}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:12}}>⚠️ Imperfections</div>
+          <QRow label="Triage"         value={form.triage}        onChange={e=>set("triage",e.target.value)}/>
+          <QRow label="Blacks"         value={form.blacks}        onChange={e=>set("blacks",e.target.value)}/>
+          <QRow label="Brows"          value={form.brows}         onChange={e=>set("brows",e.target.value)}/>
+          <QRow label="IDB"            value={form.idb}           onChange={e=>set("idb",e.target.value)}/>
+          <QRow label="Foreign Matter" value={form.foreignMatter} onChange={e=>set("foreignMatter",e.target.value)}/>
+        </div>
+      </div>
+      <div style={sh.card}>
+        <div style={{fontWeight:800,color:C.accent,marginBottom:4}}>
+          🔢 Screen / Grades
+          <span style={{float:"right",fontSize:12,fontWeight:600,color:Math.abs(totalGrades-100)<0.5?C.green:C.muted}}>Total: {totalGrades.toFixed(1)}% {Math.abs(totalGrades-100)<0.5?"✓":""}</span>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 24px"}}>
+          <QRow label="Sc.19 AAA"          value={form.sc19AAA} onChange={e=>set("sc19AAA",e.target.value)} color="#15803d"/>
+          <QRow label="Sc.18 AA"           value={form.sc18AA}  onChange={e=>set("sc18AA",e.target.value)}  color="#15803d"/>
+          <QRow label="Sc.17 A"            value={form.sc17A}   onChange={e=>set("sc17A",e.target.value)}   color="#1d4ed8"/>
+          <QRow label="Sc.15 B"            value={form.sc15B}   onChange={e=>set("sc15B",e.target.value)}   color="#1d4ed8"/>
+          <QRow label="Sc.14 C"            value={form.sc14C}   onChange={e=>set("sc14C",e.target.value)}   color="#92400e"/>
+          <QRow label="Sc.13 up"           value={form.sc13up}  onChange={e=>set("sc13up",e.target.value)}  color="#92400e"/>
+          <QRow label="PB (Peaberry)"      value={form.pb}      onChange={e=>set("pb",e.target.value)}      color="#8b5cf6"/>
+          <QRow label="Bits (below Sc.13)" value={form.bits}    onChange={e=>set("bits",e.target.value)}    color="#ef4444"/>
+          <QRow label="BBB"                value={form.bbb}     onChange={e=>set("bbb",e.target.value)}     color="#ef4444"/>
+          <QRow label="IDB"                value={form.idb}     onChange={e=>set("idb",e.target.value)}     color="#f97316"/>
+        </div>
+      </div>
+      <Field label="Quality Comments"><textarea value={form.comments} onChange={e=>set("comments",e.target.value)} rows={2} placeholder="Remarks…" style={{...sh.input,resize:"vertical"}}/></Field>
+      <div style={{display:"flex",gap:10}}><Btn onClick={submit} variant="success" size="lg">✓ Save Quality Report</Btn><Btn onClick={onDone} variant="ghost">Cancel</Btn></div>
+    </div>
+  );
+}
+
+// ── GRN MODULE ────────────────────────────────────────────────────
+function GRNModule({ state, dispatch, role }) {
+  const [showForm,setShowForm]               = useState(false);
+  const [editGRN,setEditGRN]                 = useState(null);
+  const [showQuality,setShowQuality]         = useState(null);
+  const [showDryModal, setShowDryModal]   = useState(null);
+  const [dryForm, setDryForm]             = useState({dryKg:"", purchaseQtyKg:"", storageQtyKg:""});
+  const [showRateModal,setShowRateModal]  = useState(null);
+  const [rateForm,setRateForm]            = useState({rateType:"per_kg",rate:""});
+  const [expandedId,setExpandedId]           = useState(null);
+  const [confirmDeleteId,setConfirmDeleteId] = useState(null);
+  const [filterParty,setFilterParty]         = useState("all");
+  const [filterType,setFilterType]           = useState("all");
+  const [search,setSearch]                   = useState("");
+
+  const canPost   = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+
+  const grns = useMemo(()=>state.grns.filter(g=>{
+    if(filterParty!=="all"&&g.partyId!==filterParty) return false;
+    if(filterType!=="all"&&g.grnType!==filterType) return false;
+    if(search&&!g.id?.toLowerCase().includes(search.toLowerCase())&&
+      !(state.parties[g.partyId]?.name||"").toLowerCase().includes(search.toLowerCase())&&
+      !(g.truckNo||"").toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  }),[state.grns,filterParty,filterType,search]);
+
+  const pendingRate = state.grns.filter(g=>g.ratePending&&(g.grnType==="purchase"||g.grnType==="both")).length;
+  const pendingQC = state.grns.filter(g=>needsQualityForGRN(g)&&!g.qualityReport).length;
+
+  const grnBadge = (type) => {
+    const m={purchase:{bg:"#f0fdf4",c:C.green,l:"🛒 Purchase"},storage:{bg:"#eff6ff",c:C.blue,l:"🏭 Storage"},both:{bg:"#fdf4ff",c:"#7c3aed",l:"↔ Both"}};
+    const s=m[type]||m.purchase;
+    return <span style={{background:s.bg,color:s.c,padding:"2px 8px",borderRadius:10,fontSize:11,fontWeight:700}}>{s.l}</span>;
+  };
+
+  const submitRate = async (grnId) => {
+    const g = state.grns.find(x=>x.id===grnId);
+    if(!g||!rateForm.rate) return;
+    // Use dry kg if drying enabled, otherwise net wet weight
+    const billingQty = g.hasDrying && parseFloat(g.dryKg||0)>0
+      ? parseFloat(g.dryKg)
+      : parseFloat(g.netWeight||0);
+    const purchaseValue = rateForm.rateType==="per_paka"
+      ? (parseFloat(g.totalPaka||0)*parseFloat(rateForm.rate))
+      : (billingQty*parseFloat(rateForm.rate));
+    await dispatch({type:"EDIT_GRN",id:grnId,data:{
+      ...g,
+      rateType:rateForm.rateType,
+      rate:rateForm.rate,
+      ratePending:false,
+      purchaseValue,
+    }});
+    setShowRateModal(null);
+    setRateForm({rateType:"per_kg",rate:""});
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+
+      {/* Confirm delete */}
+      {confirmDeleteId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 32px",maxWidth:380,width:"100%",boxShadow:"0 20px 60px #00000044",textAlign:"center"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:17,marginBottom:8}}>Delete GRN?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>Stock and any linked purchase voucher for <strong>{confirmDeleteId}</strong> will be reversed.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={()=>{dispatch({type:"DELETE_GRN",id:confirmDeleteId});setConfirmDeleteId(null);setExpandedId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmDeleteId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dry Quantity Modal */}
+      {showDryModal&&(()=>{
+        const g = state.grns.find(x=>x.id===showDryModal);
+        if(!g) return null;
+        const dryKg   = parseFloat(dryForm.dryKg||0);
+        const purQty  = parseFloat(dryForm.purchaseQtyKg||0);
+        const storQty = parseFloat(dryForm.storageQtyKg||0);
+        const splitOk = purQty>0||storQty>0 ? Math.abs(purQty+storQty-dryKg)<0.5 : true;
+        const purchaseQty = purQty>0 ? purQty : dryKg;
+        const dryingCharge = dryKg * parseFloat(g.dryingRate||0);
+        const purchaseValue= parseFloat(g.rate||0) * (g.rateType==="per_paka"?parseFloat(g.totalPaka||0):purchaseQty);
+        return(
+          <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:C.surface,borderRadius:14,padding:"24px",width:"100%",maxWidth:500,boxShadow:"0 20px 60px #00000044"}}>
+              <div style={{fontWeight:800,color:"#c2410c",marginBottom:4,fontSize:16}}>🌡 Enter Dry Quantity</div>
+              <div style={{color:C.muted,fontSize:13,marginBottom:16}}>{g.id} · {g.coffeeType} → {OUTPUT_MAP[g.coffeeType]} · Wet: {g.netWeight} kg</div>
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                <Field label={`Dry Weight Out (${OUTPUT_MAP[g.coffeeType]}) kg`}>
+                  <input type="number" value={dryForm.dryKg} onChange={e=>setDryForm(f=>({...f,dryKg:e.target.value}))} placeholder="0" style={sh.input} autoFocus/>
+                </Field>
+                {dryKg>0&&(
+                  <div style={{padding:"8px 12px",background:"#fff7ed",borderRadius:6,fontSize:12}}>
+                    Moisture loss: <strong>{((parseFloat(g.netWeight||0)-dryKg)/parseFloat(g.netWeight||1)*100).toFixed(1)}%</strong>
+                    {g.dryingRate>0&&<span style={{marginLeft:16}}>Drying charge: <strong style={{color:g.priceBasis==="wet"?C.red:C.green}}>{fmt(dryingCharge)}</strong> ({dryKg}kg × ₹{g.dryingRate})</span>}
+                  </div>
+                )}
+                {dryKg>0&&(
+                  <>
+                    <div style={{fontWeight:700,color:C.accent,fontSize:13,marginTop:4}}>Split dry quantity (or leave 0 for full purchase):</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                      <Field label="Purchase Qty (kg) — Company">
+                        <input type="number" value={dryForm.purchaseQtyKg} onChange={e=>setDryForm(f=>({...f,purchaseQtyKg:e.target.value}))} placeholder={`0 = all ${dryKg} kg`} style={sh.input}/>
+                      </Field>
+                      <Field label="Storage Qty (kg) — Party">
+                        <input type="number" value={dryForm.storageQtyKg} onChange={e=>setDryForm(f=>({...f,storageQtyKg:e.target.value}))} placeholder="0 = none" style={sh.input}/>
+                      </Field>
+                    </div>
+                    {(purQty>0||storQty>0)&&(
+                      <div style={{fontSize:12,color:splitOk?C.green:C.red,fontWeight:600}}>
+                        {splitOk?`✓ Split OK: ${purQty}+${storQty}=${purQty+storQty} kg`:`⚠ ${purQty}+${storQty}=${purQty+storQty} kg must equal ${dryKg} kg`}
+                      </div>
+                    )}
+                    {!g.ratePending&&g.rate>0&&(
+                      <div style={{padding:"10px 14px",background:"#f0fdf4",borderRadius:6,fontSize:12}}>
+                        Purchase value: <strong style={{color:C.green,fontFamily:"monospace"}}>{fmt(purchaseValue)}</strong>
+                        <span style={{color:C.muted,marginLeft:8}}>{purchaseQty}kg × ₹{g.rate}</span>
+                        <div style={{color:C.green,fontSize:11,marginTop:2}}>→ Auto-posts Purchase voucher to party account</div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+              <div style={{display:"flex",gap:10,marginTop:16}}>
+                <Btn onClick={async()=>{
+                  if(!dryKg||dryKg<=0) return;
+                  if((purQty>0||storQty>0)&&!splitOk) return;
+                  await dispatch({type:"EDIT_GRN",id:g.id,data:{
+                    ...g,
+                    dryKg:dryKg,
+                    purchaseQtyKg:purQty||dryKg,
+                    storageQtyKg:storQty||0,
+                    dryingCharge: dryKg * parseFloat(g.dryingRate||0), // recalculate fresh
+                    purchaseValue:purchaseValue,
+                    grnType:storQty>0&&purQty>0?"both":storQty>0&&purQty===0?"storage":"purchase",
+                  }});
+                  setShowDryModal(null);
+                  setDryForm({dryKg:"",purchaseQtyKg:"",storageQtyKg:""});
+                }} variant="success" disabled={!dryKg||dryKg<=0||((purQty>0||storQty>0)&&!splitOk)}>
+                  ✓ Confirm Dry Weight
+                </Btn>
+                <Btn onClick={()=>{setShowDryModal(null);setDryForm({dryKg:"",purchaseQtyKg:"",storageQtyKg:""}); }} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+      {/* Rate modal */}
+      {showRateModal&&(()=>{
+        const g=state.grns.find(x=>x.id===showRateModal);
+        // Use dry kg if drying done, otherwise net wet weight
+        const billingQty = g?.hasDrying && parseFloat(g?.dryKg||0)>0
+          ? parseFloat(g.dryKg)
+          : parseFloat(g?.netWeight||0);
+        const qty=rateForm.rateType==="per_paka"?parseFloat(g?.totalPaka||0):billingQty;
+        const val=qty*parseFloat(rateForm.rate||0);
+        return(
+          <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center"}}>
+            <div style={{background:C.surface,borderRadius:14,padding:"28px 32px",maxWidth:420,width:"100%",boxShadow:"0 20px 60px #00000044"}}>
+              <div style={{fontWeight:800,color:C.accent,marginBottom:4,fontSize:16}}>💰 Enter Purchase Rate</div>
+              <div style={{color:C.muted,fontSize:13,marginBottom:16}}>
+                {g?.id} · {g?.coffeeType}
+                {g?.hasDrying && parseFloat(g?.dryKg||0)>0
+                  ? <span> · <strong style={{color:"#c2410c"}}>Billing on Dry: {g.dryKg} kg</strong> (Wet: {g?.netWeight} kg)</span>
+                  : <span> · Net: {g?.netWeight} kg{g?.totalPaka?` · ${g.totalPaka} paka`:""}</span>}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                <Field label="Rate Type">
+                  <select value={rateForm.rateType} onChange={e=>setRateForm(f=>({...f,rateType:e.target.value}))} style={sh.input}>
+                    <option value="per_kg">Per KG (₹/kg)</option>
+                    {isUnitType(g?.coffeeType||"")&&<option value="per_paka">Per Paka (₹/paka)</option>}
+                  </select>
+                </Field>
+                <Field label={rateForm.rateType==="per_paka"?"Rate per Paka (₹)":"Rate per KG (₹)"}>
+                  <input type="number" value={rateForm.rate} onChange={e=>setRateForm(f=>({...f,rate:e.target.value}))} placeholder="0.00" style={sh.input} autoFocus/>
+                </Field>
+                {val>0&&<div style={{padding:"10px 14px",background:"#f0fdf4",borderRadius:6}}>
+                  <div style={{fontSize:12,color:C.muted}}>Purchase Value</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.green}}>{fmt(val)}</div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:2}}>→ Auto-posts Purchase voucher to party ledger</div>
+                </div>}
+              </div>
+              <div style={{display:"flex",gap:10,marginTop:16}}>
+                <Btn onClick={()=>submitRate(showRateModal)} variant="success" disabled={!rateForm.rate}>✓ Confirm & Post</Btn>
+                <Btn onClick={()=>setShowRateModal(null)} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📋 GRN Register</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Goods Receipt Notes · Coffee Vel International</p>
+        </div>
+        {canPost&&<Btn onClick={()=>{setEditGRN(null);setShowForm(true);}} variant="success" size="lg">+ New GRN</Btn>}
+      </div>
+
+      {/* Summary cards */}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        {[
+          {icon:"📋",label:"Total GRNs",    value:state.grns.length},
+          {icon:"🛒",label:"Purchase",       value:state.grns.filter(g=>g.grnType==="purchase"||g.grnType==="both").length, color:C.green},
+          {icon:"🏭",label:"Storage",        value:state.grns.filter(g=>g.grnType==="storage"||g.grnType==="both").length,  color:C.blue},
+          {icon:"⚖️",label:"Total Net (kg)", value:state.grns.reduce((s,g)=>s+parseFloat(g.netWeight||0),0).toLocaleString("en-IN",{maximumFractionDigits:0})},
+          {icon:"⏳",label:"Drying Pending",value:state.grns.filter(g=>g.hasDrying&&!g.dryKg).length,color:state.grns.filter(g=>g.hasDrying&&!g.dryKg).length>0?"#c2410c":C.muted},
+          {icon:"⚠️",label:"Rate Pending",   value:pendingRate, color:pendingRate>0?C.red:C.muted},
+          {icon:"🔬",label:"QC Pending",     value:pendingQC,   color:pendingQC>0?"#92400e":C.muted},
+        ].map(s=>(
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:120}}>
+            <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:s.color||C.accent,marginTop:4}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Form */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:16,fontSize:16}}>{editGRN?`✏ Edit GRN — ${editGRN.id}`:"📋 New Goods Receipt Note"}</div>
+          <GRNForm state={state} dispatch={dispatch} initial={editGRN||undefined} editId={editGRN?.id} onDone={()=>{setShowForm(false);setEditGRN(null);}}/>
+        </div>
+      )}
+
+      {/* Filters */}
+      <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <Field label="Search"><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="GRN / Party / Truck…" style={{...sh.input,width:200}}/></Field>
+        <Field label="Party">
+          <select value={filterParty} onChange={e=>setFilterParty(e.target.value)} style={{...sh.input,width:160}}>
+            <option value="all">All Parties</option>
+            {Object.values(state.parties).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Type">
+          <select value={filterType} onChange={e=>setFilterType(e.target.value)} style={{...sh.input,width:140}}>
+            <option value="all">All</option><option value="purchase">Purchase</option>
+            <option value="storage">Storage</option><option value="both">Both</option>
+          </select>
+        </Field>
+        {(filterParty!=="all"||filterType!=="all"||search)&&<Btn variant="ghost" size="sm" onClick={()=>{setFilterParty("all");setFilterType("all");setSearch("");}}>✕ Clear</Btn>}
+        <span style={{marginLeft:"auto",color:C.muted,fontSize:13,alignSelf:"flex-end"}}>{grns.length} GRN{grns.length!==1?"s":""}</span>
+      </div>
+
+      {/* Quality modal */}
+      {showQuality&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"24px",width:"100%",maxWidth:720,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <div style={{fontWeight:800,fontSize:16,color:C.accent}}>🔬 Quality Analysis — {showQuality}</div>
+              <button onClick={()=>setShowQuality(null)} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:C.muted}}>×</button>
+            </div>
+            <QualityForm grnId={showQuality} existing={state.grns.find(g=>g.id===showQuality)?.qualityReport} dispatch={dispatch} onDone={()=>setShowQuality(null)}/>
+          </div>
+        </div>
+      )}
+
+      {/* GRN List */}
+      {grns.length===0?(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:40,marginBottom:8}}>📋</div>No GRNs yet.
+        </div>
+      ):grns.map(g=>{
+        const party   = state.parties[g.partyId];
+        const expanded= expandedId===g.id;
+        const hasQR   = !!g.qualityReport;
+        const netWt   = parseFloat(g.netWeight||0);
+        const needsQC = needsQualityForGRN(g);
+        const dryDone = (g.hasDrying===true||g.hasDrying==="true") && parseFloat(g.dryKg||0)>0;
+        const showQCBtn = needsQuality(g.coffeeType) || dryDone;
+        const hasDry  = g.hasDrying;
+        return(
+          <div key={g.id} style={{...sh.card,padding:0,overflow:"hidden"}}>
+            <div onClick={()=>setExpandedId(expanded?null:g.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 16px",cursor:"pointer",background:expanded?"#fdf0e8":C.surface,flexWrap:"wrap"}}>
+              <div style={{background:C.accent+"18",color:C.accent,border:`1px solid ${C.accent}33`,padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{g.id}</div>
+              <span style={{fontSize:13,color:C.muted,minWidth:90}}>{g.date}</span>
+              <span style={{fontWeight:700,color:C.text,flex:1}}>{party?.name||"Unknown"}</span>
+              {grnBadge(g.grnType)}
+              <span style={{fontSize:12,background:"#fdf4ff",color:"#7c3aed",padding:"2px 8px",borderRadius:4,fontWeight:600}}>{g.coffeeType}</span>
+              {g.inputMode==="unit"&&g.noOfUnits&&<span style={{fontSize:11,color:C.muted}}>{g.noOfUnits}u {g.noOfPaka||0}p</span>}
+              <span style={{fontFamily:"monospace",fontWeight:800,color:C.green,fontSize:13}}>{netWt.toLocaleString("en-IN",{maximumFractionDigits:2})} kg</span>
+              {hasDry&&!g.dryKg&&<span style={{fontSize:11,background:"#fff7ed",color:"#c2410c",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⏳ Drying Pending</span>}
+              {hasDry&&g.dryKg>0&&<span style={{fontSize:11,background:"#fff7ed",color:"#c2410c",padding:"2px 8px",borderRadius:10,fontWeight:700}}>🌡 {g.dryKg} kg dry</span>}
+              {g.ratePending&&<span style={{fontSize:11,background:"#fef9c3",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⚠ Rate Pending</span>}
+              {showQCBtn&&!hasQR&&<span style={{fontSize:11,background:"#fef9c3",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⚠ QC Pending</span>}
+              {showQCBtn&&hasQR&&<span style={{fontSize:11,background:"#dcfce7",color:C.green,padding:"2px 8px",borderRadius:10,fontWeight:700}}>✓ QC Done</span>}
+              <span style={{color:C.muted}}>{expanded?"▲":"▼"}</span>
+            </div>
+
+            {expanded&&(
+              <div style={{borderTop:`1px solid ${C.border}`}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
+                  <div style={{padding:"14px 18px",borderRight:`1px solid ${C.border}`}}>
+                    <div style={{fontWeight:800,color:C.accent,fontSize:12,marginBottom:8,textTransform:"uppercase"}}>⚖️ Weight</div>
+                    {[["Bags",g.totalBags||g.noOfBags||"—"],["1st Wt",(g.firstWeight||0)+" kg"],["2nd Wt",(g.secondWeight||0)+" kg"],["Gross",(g.grossWeight||0)+" kg"],["Deduction",(g.rejectedBags||0)+" kg"],["Net Wt",netWt+" kg"]].map(([l,v])=>(
+                      <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderBottom:`1px solid #f5ede4`,fontSize:13}}>
+                        <span style={{color:C.muted}}>{l}</span>
+                        <span style={{fontFamily:"monospace",fontWeight:l==="Net Wt"?800:500,color:l==="Net Wt"?C.green:C.text}}>{v}</span>
+                      </div>
+                    ))}
+                    {g.inputMode==="unit"&&<div style={{marginTop:6,fontSize:12,color:"#7c3aed"}}>{g.noOfUnits||0} units {g.noOfPaka||0} paka = {g.totalPaka||0} paka total</div>}
+                  </div>
+                  <div style={{padding:"14px 18px"}}>
+                    <div style={{fontWeight:800,color:C.accent,fontSize:12,marginBottom:8,textTransform:"uppercase"}}>📦 Details</div>
+                    {[["Truck",g.truckNo],["Crop",g.cropSeason],["Location",g.location],["Warehouse",g.warehouse],["Zone",g.warehouseZone||"—"],["Stock No",g.stockNo||"—"]].map(([l,v])=>(
+                      <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderBottom:`1px solid #f5ede4`,fontSize:13}}>
+                        <span style={{color:C.muted}}>{l}</span><span>{v}</span>
+                      </div>
+                    ))}
+                    {hasDry&&(
+                      <div style={{marginTop:8,padding:"8px 10px",background:"#fff7ed",borderRadius:6}}>
+                        <div style={{fontWeight:700,color:"#c2410c",fontSize:12}}>🌡 Drying → {g.outputType}</div>
+                        <div style={{fontSize:12,marginTop:2}}>Dry Wt: <strong>{g.dryKg} kg</strong> · {g.dryingMethod}</div>
+                        <div style={{fontSize:12}}>Price basis: <strong>{g.priceBasis==="wet"?"Wet weight":"Dry weight"}</strong></div>
+                        {g.dryingCharge>0&&<div style={{fontSize:12,color:g.priceBasis==="wet"?C.red:C.green,fontWeight:600}}>
+                          Drying: {g.dryKg}kg × ₹{g.dryingRate} = {fmt(g.dryingCharge)} → {g.priceBasis==="wet"?"Dr Drying A/c (company expense)":"Dr Party (billed to party)"}
+                        </div>}
+                      </div>
+                    )}
+                    {(g.grnType==="purchase"||g.grnType==="both")&&(
+                      <div style={{marginTop:8,padding:"8px 10px",background:g.ratePending?"#fef9c3":"#f0fdf4",borderRadius:6}}>
+                        {g.ratePending
+                          ?<div style={{fontSize:12,color:"#92400e",fontWeight:700}}>⚠ Rate not yet fixed</div>
+                          :<div style={{fontSize:12,color:C.green}}>₹{g.rate} {g.rateType==="per_paka"?"per paka":"per kg"} → <strong>{fmt(g.purchaseValue||0)}</strong></div>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div style={{padding:"10px 16px",display:"flex",gap:8,justifyContent:"flex-end",background:"#fdf8f4",flexWrap:"wrap"}}>
+                  {canPost&&g.hasDrying&&!g.dryKg&&(
+                    <Btn size="sm" variant="success" onClick={()=>{setShowDryModal(g.id);setDryForm({dryKg:"",purchaseQtyKg:"",storageQtyKg:""});}}>🌡 Enter Dry Quantity</Btn>
+                  )}
+                  {canPost&&g.ratePending&&(g.grnType==="purchase"||g.grnType==="both")&&(
+                    <Btn size="sm" variant="success" onClick={()=>{setShowRateModal(g.id);setRateForm({rateType:g.rateType||"per_kg",rate:""});}}>💰 Enter Rate</Btn>
+                  )}
+                  {canPost&&<Btn size="sm" variant="outline" onClick={()=>{setEditGRN(g);setShowForm(true);setExpandedId(null);}}>✏ Edit</Btn>}
+                  {showQCBtn&&<Btn size="sm" variant="outline" onClick={()=>setShowQuality(g.id)}>{hasQR?"🔬 Edit QC":"🔬 Add QC"}</Btn>}
+                  {canDelete&&<Btn size="sm" variant="danger" onClick={()=>setConfirmDeleteId(g.id)}>🗑 Delete</Btn>}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
+// ── MASTERS MODULE ────────────────────────────────────────────────
+function MasterList({ title, icon, items, onAdd, onEdit, onDelete, usageCheck }) {
+  const [newName, setNewName] = useState("");
+  const [editId, setEditId]   = useState(null);
+  const [editVal, setEditVal] = useState("");
+  const [err, setErr]         = useState("");
+
+  const add = async () => {
+    if (!newName.trim()) return;
+    setErr("");
+    try { await onAdd(newName.trim()); setNewName(""); }
+    catch(e) { setErr(e.message); }
+  };
+  const save = async () => {
+    if (!editVal.trim()) return;
+    try { await onEdit(editId, editVal.trim()); setEditId(null); setEditVal(""); }
+    catch(e) { setErr(e.message); }
+  };
+  const del = async (item) => {
+    const count = usageCheck ? usageCheck(item) : 0;
+    if (count > 0) { setErr(`Cannot delete "${item.name}" — used in ${count} record(s)`); return; }
+    setErr("");
+    try { await onDelete(item.id); }
+    catch(e) { setErr(e.message); }
+  };
+
+  return (
+    <div style={sh.card}>
+      <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>{icon} {title}</div>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder={`Add new ${title.toLowerCase()}…`}
+          style={{...sh.input,flex:1}} onKeyDown={e=>e.key==="Enter"&&add()}/>
+        <Btn onClick={add} variant="success" size="sm">+ Add</Btn>
+      </div>
+      {err&&<div style={{color:C.red,fontSize:12,marginBottom:8,fontWeight:600}}>{err}</div>}
+      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+        {items.map(item=>(
+          <div key={item.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.cream,borderRadius:6}}>
+            {editId===item.id ? (
+              <>
+                <input value={editVal} onChange={e=>setEditVal(e.target.value)} style={{...sh.input,flex:1}}
+                  autoFocus onKeyDown={e=>{if(e.key==="Enter")save();if(e.key==="Escape"){setEditId(null);setEditVal("");}}}/>
+                <Btn size="sm" variant="success" onClick={save}>✓</Btn>
+                <Btn size="sm" variant="ghost" onClick={()=>{setEditId(null);setEditVal("");}}>✕</Btn>
+              </>
+            ) : (
+              <>
+                <span style={{flex:1,fontSize:13,color:C.text}}>{item.name}</span>
+                <button onClick={()=>{setEditId(item.id);setEditVal(item.name);}} style={{background:"none",border:"none",cursor:"pointer",color:C.blue,fontSize:12,fontWeight:600}}>✏ Edit</button>
+                <button onClick={()=>del(item)} style={{background:"none",border:"none",cursor:"pointer",color:C.red,fontSize:12,fontWeight:600}}>🗑</button>
+              </>
+            )}
+          </div>
+        ))}
+        {items.length===0&&<div style={{color:C.muted,fontSize:13,textAlign:"center",padding:12}}>No items yet</div>}
+      </div>
+    </div>
+  );
+}
+
+function MastersModule({ state, dispatch }) {
+  const { warehouses, locations, coffeeTypes, grns } = state;
+
+  const grnWarehouseCount = (item) => grns.filter(g=>g.warehouse===item.name).length;
+  const grnLocationCount  = (item) => grns.filter(g=>g.location===item.name).length;
+  const grnCoffeeCount    = (item) => grns.filter(g=>g.coffeeType===item.name).length;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>🗂 Masters</h2>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:20}}>
+        <MasterList title="Warehouses" icon="🏭" items={warehouses}
+          onAdd={async n=>{await dispatch({type:"ADD_WAREHOUSE",name:n});}}
+          onEdit={async (id,n)=>{await dispatch({type:"EDIT_WAREHOUSE",id,name:n});}}
+          onDelete={async id=>{await dispatch({type:"DELETE_WAREHOUSE",id});}}
+          usageCheck={grnWarehouseCount}/>
+        <MasterList title="Locations" icon="📍" items={locations}
+          onAdd={async n=>{await dispatch({type:"ADD_LOCATION",name:n});}}
+          onEdit={async (id,n)=>{await dispatch({type:"EDIT_LOCATION",id,name:n});}}
+          onDelete={async id=>{await dispatch({type:"DELETE_LOCATION",id});}}
+          usageCheck={grnLocationCount}/>
+        <MasterList title="Coffee Types" icon="☕" items={coffeeTypes}
+          onAdd={async n=>{await dispatch({type:"ADD_COFFEE_TYPE",name:n});}}
+          onEdit={async (id,n)=>{await dispatch({type:"EDIT_COFFEE_TYPE",id,name:n});}}
+          onDelete={async id=>{await dispatch({type:"DELETE_COFFEE_TYPE",id});}}
+          usageCheck={grnCoffeeCount}/>
+      </div>
+    </div>
+  );
+}
+
+// ── DRYING MODULE ─────────────────────────────────────────────────
+function DryingModule({ state, dispatch, role }) {
+  const [showForm, setShowForm] = useState(false);
+  const [confirmId, setConfirmId] = useState(null);
+  const [form, setForm] = useState({
+    date:today(), partyId:"", coffeeType:"", dryingMethod:"Yard",
+    wetWeight:"", dryWeight:"", ratePerKg:"", location:"", narration:"",
+  });
+  const [formErr, setFormErr] = useState("");
+
+  const parties    = Object.values(state.parties).filter(p=>p.partyType==="supplier");
+  const coffeeTypes= state.coffeeTypes.map(c=>c.name);
+  const locations  = state.locations.map(l=>l.name);
+
+  const set = (f,v) => setForm(p=>({...p,[f]:v}));
+
+  const moistureLoss = () => {
+    const w = parseFloat(form.wetWeight||0), d = parseFloat(form.dryWeight||0);
+    return w > 0 ? ((w-d)/w*100).toFixed(1) : "0.0";
+  };
+  const totalCharge = () => (parseFloat(form.dryWeight||0) * parseFloat(form.ratePerKg||0)).toFixed(2);
+
+  const submit = async () => {
+    if (!form.partyId)    { setFormErr("Select a party"); return; }
+    if (!form.coffeeType) { setFormErr("Select coffee type"); return; }
+    if (!form.dryWeight || parseFloat(form.dryWeight)<=0) { setFormErr("Enter dry weight"); return; }
+    setFormErr("");
+    await dispatch({ type:"ADD_DRYING_JOB", data:{
+      ...form,
+      moistureLoss: parseFloat(moistureLoss()),
+      totalCharge: parseFloat(totalCharge()),
+    }});
+    setShowForm(false);
+    setForm({date:today(),partyId:"",coffeeType:"",dryingMethod:"Yard",wetWeight:"",dryWeight:"",ratePerKg:"",location:"",narration:""});
+  };
+
+  const canPost = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>🌡 Drying Register</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Yard & Mechanical Drying Jobs</p>
+        </div>
+        {canPost&&<Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Drying Job</Btn>}
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        {[
+          {icon:"🌡",label:"Total Jobs",    value:state.dryingJobs.length},
+          {icon:"💧",label:"Total Wet Wt",  value:state.dryingJobs.reduce((s,d)=>s+parseFloat(d.wetWeight||0),0).toLocaleString("en-IN",{maximumFractionDigits:1})+" kg"},
+          {icon:"☀️",label:"Total Dry Wt",  value:state.dryingJobs.reduce((s,d)=>s+parseFloat(d.dryWeight||0),0).toLocaleString("en-IN",{maximumFractionDigits:1})+" kg"},
+          {icon:"💰",label:"Total Charges", value:fmt(state.dryingJobs.reduce((s,d)=>s+parseFloat(d.totalCharge||0),0))},
+        ].map(s=>(
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:140}}>
+            <div style={{fontSize:20,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:4}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Confirm delete */}
+      {confirmId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 32px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:16,marginBottom:8}}>Delete Drying Job?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>The linked voucher entries will remain. Delete job record only.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={async()=>{await dispatch({type:"DELETE_DRYING_JOB",id:confirmId});setConfirmId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New job form */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>🌡 New Drying Job</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+            <Field label="Date"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
+            <Field label="Party">
+              <select value={form.partyId} onChange={e=>set("partyId",e.target.value)} style={sh.input}>
+                <option value="">— Select Party —</option>
+                {parties.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Coffee Type">
+              <select value={form.coffeeType} onChange={e=>set("coffeeType",e.target.value)} style={sh.input}>
+                <option value="">— Select Type —</option>
+                {coffeeTypes.map(c=><option key={c} value={c}>{c}</option>)}
+              </select>
+            </Field>
+            <Field label="Drying Method">
+              <select value={form.dryingMethod} onChange={e=>set("dryingMethod",e.target.value)} style={sh.input}>
+                <option value="Yard">Yard Drying</option>
+                <option value="Mechanical">Mechanical Dryer</option>
+              </select>
+            </Field>
+            <Field label="Location">
+              <select value={form.location} onChange={e=>set("location",e.target.value)} style={sh.input}>
+                <option value="">— Select Location —</option>
+                {locations.map(l=><option key={l} value={l}>{l}</option>)}
+              </select>
+            </Field>
+            <Field label="Wet Weight (kg)"><input type="number" value={form.wetWeight} onChange={e=>set("wetWeight",e.target.value)} placeholder="0" style={sh.input}/></Field>
+            <Field label="Dry Weight (kg)"><input type="number" value={form.dryWeight} onChange={e=>set("dryWeight",e.target.value)} placeholder="0" style={sh.input}/></Field>
+            <Field label="Rate per kg (₹)"><input type="number" value={form.ratePerKg} onChange={e=>set("ratePerKg",e.target.value)} placeholder="0.00" style={sh.input}/></Field>
+            <Field label="Narration"><input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+          </div>
+          {/* Computed fields */}
+          {form.wetWeight&&form.dryWeight&&(
+            <div style={{display:"flex",gap:16,marginTop:14,padding:"12px 16px",background:C.cream,borderRadius:8,flexWrap:"wrap"}}>
+              <div><span style={{fontSize:12,color:C.muted}}>Moisture Loss: </span><strong>{moistureLoss()}%</strong></div>
+              <div><span style={{fontSize:12,color:C.muted}}>Total Charge: </span><strong style={{color:C.green,fontFamily:"monospace"}}>{fmt(totalCharge())}</strong></div>
+              <div style={{fontSize:12,color:C.muted}}>→ Auto-creates receipt voucher for drying charges</div>
+            </div>
+          )}
+          {formErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{formErr}</div>}
+          <div style={{display:"flex",gap:10,marginTop:14}}>
+            <Btn onClick={submit} variant="success" size="lg">✓ Save Drying Job</Btn>
+            <Btn onClick={()=>{setShowForm(false);setFormErr("");}} variant="ghost">Cancel</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* Jobs list */}
+      {state.dryingJobs.length===0?(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:36,marginBottom:8}}>🌡</div>No drying jobs recorded yet.
+        </div>
+      ):state.dryingJobs.map(job=>{
+        const party = state.parties[job.partyId];
+        return(
+          <div key={job.id} style={{...sh.card}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
+              <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+                <span style={{background:C.accent+"18",color:C.accent,border:`1px solid ${C.accent}33`,padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{job.id}</span>
+                <span style={{fontSize:13,color:C.muted}}>{job.date}</span>
+                <span style={{fontWeight:700,color:C.text}}>{party?.name||"—"}</span>
+                <span style={{fontSize:12,background:"#eff6ff",color:C.blue,padding:"2px 8px",borderRadius:4}}>{job.coffeeType}</span>
+                <span style={{fontSize:12,color:C.muted}}>{job.dryingMethod} Drying</span>
+                {job.location&&<span style={{fontSize:12,color:C.muted}}>📍 {job.location}</span>}
+              </div>
+              <div style={{display:"flex",gap:16,alignItems:"center"}}>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.green}}>{fmt(job.totalCharge||0)}</div>
+                  <div style={{fontSize:11,color:C.muted}}>Drying Charges</div>
+                </div>
+                {canDelete&&<Btn size="sm" variant="danger" onClick={()=>setConfirmId(job.id)}>🗑</Btn>}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:24,marginTop:12,padding:"10px 0",borderTop:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+              {[
+                ["Wet Weight", (job.wetWeight||0)+" kg"],
+                ["Dry Weight", (job.dryWeight||0)+" kg"],
+                ["Moisture Loss", (job.moistureLoss||0)+"%"],
+                ["Rate/kg", fmt(job.ratePerKg||0)],
+              ].map(([l,v])=>(
+                <div key={l}><div style={{fontSize:11,color:C.muted}}>{l}</div><div style={{fontWeight:700,fontSize:13}}>{v}</div></div>
+              ))}
+            </div>
+            {job.narration&&<div style={{fontSize:12,color:C.muted,marginTop:6,fontStyle:"italic"}}>{job.narration}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── STORAGE MODULE ────────────────────────────────────────────────
+function StorageModule({ state, dispatch, role }) {
+  const [showForm, setShowForm]       = useState(false);
+  const [showRelease, setShowRelease] = useState(null); // lotId
+  const [confirmId, setConfirmId]     = useState(null);
+  const [filter, setFilter]           = useState("all"); // all | stored | released
+  const [form, setForm] = useState({
+    date:today(), partyId:"", coffeeType:"", quantity:"", unit:"kg",
+    location:"", warehouse:"", stockNo:"", narration:"",
+  });
+  const [releaseForm, setReleaseForm] = useState({
+    date:today(), quantityReleased:"", storageChargePerKg:"", dryingChargePerKg:"", narration:"",
+  });
+  const [formErr, setFormErr] = useState("");
+
+  const parties    = Object.values(state.parties);
+  const coffeeTypes= state.coffeeTypes.map(c=>c.name);
+  const locations  = state.locations.map(l=>l.name);
+  const warehouses = state.warehouses.map(w=>w.name);
+
+  const set  = (f,v)=>setForm(p=>({...p,[f]:v}));
+  const setR = (f,v)=>setReleaseForm(p=>({...p,[f]:v}));
+
+  const canPost   = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+
+  const filteredLots = state.storageLots.filter(l=>filter==="all"||l.status===filter);
+
+  const getLotReleased = (lotId) => state.storageReleases.filter(r=>r.lotId===lotId).reduce((s,r)=>s+parseFloat(r.quantityReleased||0),0);
+
+  const submitLot = async () => {
+    if (!form.partyId)  { setFormErr("Select a party"); return; }
+    if (!form.coffeeType){ setFormErr("Select coffee type"); return; }
+    if (!form.quantity || parseFloat(form.quantity)<=0) { setFormErr("Enter quantity"); return; }
+    setFormErr("");
+    await dispatch({ type:"ADD_STORAGE_LOT", data:{ ...form, status:"stored" } });
+    setShowForm(false);
+    setForm({date:today(),partyId:"",coffeeType:"",quantity:"",unit:"kg",location:"",warehouse:"",stockNo:"",narration:""});
+  };
+
+  const submitRelease = async (lot) => {
+    const qty = parseFloat(releaseForm.quantityReleased||0);
+    if (qty<=0) { setFormErr("Enter quantity to release"); return; }
+    const remaining = parseFloat(lot.quantity||0) - getLotReleased(lot.id);
+    if (qty > remaining) { setFormErr(`Cannot release more than remaining ${remaining} kg`); return; }
+    const storCharge = qty * parseFloat(releaseForm.storageChargePerKg||0);
+    const dryCharge  = qty * parseFloat(releaseForm.dryingChargePerKg||0);
+    const totalCharge = storCharge + dryCharge;
+    setFormErr("");
+    await dispatch({ type:"RELEASE_STORAGE", data:{
+      lotId:lot.id, partyId:lot.partyId, date:releaseForm.date,
+      quantityReleased:qty, storageChargePerKg:parseFloat(releaseForm.storageChargePerKg||0),
+      dryingChargePerKg:parseFloat(releaseForm.dryingChargePerKg||0), totalCharge,
+      narration:releaseForm.narration,
+    }});
+    setShowRelease(null);
+    setReleaseForm({date:today(),quantityReleased:"",storageChargePerKg:"",dryingChargePerKg:"",narration:""});
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>🏭 Party Storage Register</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Coffee received for storage & drying on behalf of parties</p>
+        </div>
+        {canPost&&<Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Storage Lot</Btn>}
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        {[
+          {icon:"🏭",label:"Total Lots",   value:state.storageLots.length},
+          {icon:"📦",label:"Stored",        value:state.storageLots.filter(l=>l.status==="stored").length,        color:C.blue},
+          {icon:"⚡",label:"Part. Released",value:state.storageLots.filter(l=>l.status==="partially_released").length, color:C.gold},
+          {icon:"✅",label:"Released",      value:state.storageLots.filter(l=>l.status==="released").length,      color:C.green},
+        ].map(s=>(
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:130}}>
+            <div style={{fontSize:20,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:s.color||C.accent,marginTop:4}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Confirm delete */}
+      {confirmId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 32px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:16,marginBottom:8}}>Delete Storage Lot?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>This will remove the lot record. Release records will remain.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={async()=>{await dispatch({type:"DELETE_STORAGE_LOT",id:confirmId});setConfirmId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Release modal */}
+      {showRelease&&(()=>{
+        const lot = state.storageLots.find(l=>l.id===showRelease);
+        if(!lot) return null;
+        const released = getLotReleased(lot.id);
+        const remaining = parseFloat(lot.quantity||0) - released;
+        const party = state.parties[lot.partyId];
+        const qty = parseFloat(releaseForm.quantityReleased||0);
+        const totalCharge = qty*(parseFloat(releaseForm.storageChargePerKg||0)+parseFloat(releaseForm.dryingChargePerKg||0));
+        return(
+          <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:C.surface,borderRadius:14,padding:"24px",width:"100%",maxWidth:480,boxShadow:"0 20px 60px #00000044"}}>
+              <div style={{fontWeight:800,color:C.accent,marginBottom:4,fontSize:16}}>📤 Release Coffee — {lot.id}</div>
+              <div style={{color:C.muted,fontSize:13,marginBottom:16}}>{party?.name} · {lot.coffeeType} · Remaining: <strong>{remaining} kg</strong></div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                <Field label="Release Date"><input type="date" value={releaseForm.date} onChange={e=>setR("date",e.target.value)} style={sh.input}/></Field>
+                <Field label={`Qty to Release (max ${remaining} kg)`}><input type="number" value={releaseForm.quantityReleased} onChange={e=>setR("quantityReleased",e.target.value)} placeholder="0" style={sh.input}/></Field>
+                <Field label="Storage Charge/kg (₹)"><input type="number" value={releaseForm.storageChargePerKg} onChange={e=>setR("storageChargePerKg",e.target.value)} placeholder="0.00" style={sh.input}/></Field>
+                <Field label="Drying Charge/kg (₹)"><input type="number" value={releaseForm.dryingChargePerKg} onChange={e=>setR("dryingChargePerKg",e.target.value)} placeholder="0.00" style={sh.input}/></Field>
+                <Field label="Narration" style={{gridColumn:"span 2"}}><input value={releaseForm.narration} onChange={e=>setR("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+              </div>
+              {qty>0&&<div style={{marginTop:12,padding:"10px 14px",background:C.cream,borderRadius:8,fontSize:13}}>
+                Total Charges: <strong style={{color:C.green,fontFamily:"monospace"}}>{fmt(totalCharge)}</strong>
+                {totalCharge>0&&<span style={{color:C.muted,marginLeft:8}}>→ Auto-creates receipt voucher</span>}
+              </div>}
+              {formErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:8,padding:"8px",background:"#fee2e2",borderRadius:6}}>{formErr}</div>}
+              <div style={{display:"flex",gap:10,marginTop:16}}>
+                <Btn onClick={()=>submitRelease(lot)} variant="success">✓ Release</Btn>
+                <Btn onClick={()=>{setShowRelease(null);setFormErr("");}} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* New lot form */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>🏭 New Storage Lot</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+            <Field label="Date"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
+            <Field label="Party">
+              <select value={form.partyId} onChange={e=>set("partyId",e.target.value)} style={sh.input}>
+                <option value="">— Select Party —</option>
+                {parties.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Coffee Type">
+              <select value={form.coffeeType} onChange={e=>set("coffeeType",e.target.value)} style={sh.input}>
+                <option value="">— Select Type —</option>
+                {coffeeTypes.map(c=><option key={c} value={c}>{c}</option>)}
+              </select>
+            </Field>
+            <Field label="Quantity (kg)"><input type="number" value={form.quantity} onChange={e=>set("quantity",e.target.value)} placeholder="0" style={sh.input}/></Field>
+            <Field label="Location">
+              <select value={form.location} onChange={e=>set("location",e.target.value)} style={sh.input}>
+                <option value="">— Select Location —</option>
+                {locations.map(l=><option key={l} value={l}>{l}</option>)}
+              </select>
+            </Field>
+            <Field label="Warehouse">
+              <select value={form.warehouse} onChange={e=>set("warehouse",e.target.value)} style={sh.input}>
+                <option value="">— Select Warehouse —</option>
+                {warehouses.map(w=><option key={w} value={w}>{w}</option>)}
+              </select>
+            </Field>
+            <Field label="Stock No."><input value={form.stockNo} onChange={e=>set("stockNo",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+            <Field label="Narration"><input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+          </div>
+          {formErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{formErr}</div>}
+          <div style={{display:"flex",gap:10,marginTop:14}}>
+            <Btn onClick={submitLot} variant="success" size="lg">✓ Save Storage Lot</Btn>
+            <Btn onClick={()=>{setShowForm(false);setFormErr("");}} variant="ghost">Cancel</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* Filter */}
+      <div style={{display:"flex",gap:8}}>
+        {[["all","All"],["stored","Stored"],["partially_released","Part. Released"],["released","Released"]].map(([v,l])=>(
+          <button key={v} onClick={()=>setFilter(v)} style={{padding:"5px 14px",borderRadius:20,border:`1px solid ${filter===v?C.accent:C.border}`,background:filter===v?C.accent:"transparent",color:filter===v?"#fff":C.muted,fontWeight:600,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{l}</button>
+        ))}
+        <span style={{marginLeft:"auto",color:C.muted,fontSize:13,alignSelf:"center"}}>{filteredLots.length} lot{filteredLots.length!==1?"s":""}</span>
+      </div>
+
+      {/* Lots list */}
+      {filteredLots.length===0?(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:36,marginBottom:8}}>🏭</div>No storage lots yet.
+        </div>
+      ):filteredLots.map(lot=>{
+        const party    = state.parties[lot.partyId];
+        const released = getLotReleased(lot.id);
+        const remaining= parseFloat(lot.quantity||0) - released;
+        const releases = state.storageReleases.filter(r=>r.lotId===lot.id);
+        const statusColors = {stored:"#3b82f6",partially_released:"#f59e0b",released:"#15803d"};
+        const statusLabels = {stored:"🔵 Stored",partially_released:"🟡 Part. Released",released:"✅ Released"};
+        return(
+          <div key={lot.id} style={{...sh.card}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
+              <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+                <span style={{background:C.accent+"18",color:C.accent,border:`1px solid ${C.accent}33`,padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{lot.id}</span>
+                <span style={{fontSize:13,color:C.muted}}>{lot.date}</span>
+                <span style={{fontWeight:700,color:C.text}}>{party?.name||"—"}</span>
+                <span style={{fontSize:12,background:"#eff6ff",color:C.blue,padding:"2px 8px",borderRadius:4}}>{lot.coffeeType}</span>
+                <span style={{fontSize:11,color:statusColors[lot.status],fontWeight:700}}>{statusLabels[lot.status]}</span>
+              </div>
+              <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:C.accent}}>{parseFloat(lot.quantity||0).toLocaleString("en-IN")} kg</div>
+                  <div style={{fontSize:11,color:C.muted}}>Remaining: <strong style={{color:remaining>0?C.blue:C.green}}>{remaining.toLocaleString("en-IN")} kg</strong></div>
+                </div>
+                {canPost&&lot.status!=="released"&&<Btn size="sm" variant="outline" onClick={()=>{setShowRelease(lot.id);setFormErr("");}}>📤 Release</Btn>}
+                {canDelete&&<Btn size="sm" variant="danger" onClick={()=>setConfirmId(lot.id)}>🗑</Btn>}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:16,marginTop:8,fontSize:12,color:C.muted,flexWrap:"wrap"}}>
+              {lot.warehouse&&<span>🏭 {lot.warehouse}</span>}
+              {lot.location&&<span>📍 {lot.location}</span>}
+              {lot.stockNo&&<span>Stock: {lot.stockNo}</span>}
+            </div>
+            {releases.length>0&&(
+              <div style={{marginTop:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase"}}>Release History</div>
+                {releases.map(r=>(
+                  <div key={r.id} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid #f5ede4`,fontSize:12}}>
+                    <span style={{color:C.muted}}>{r.date} · {r.id}</span>
+                    <span>{parseFloat(r.quantityReleased||0)} kg</span>
+                    <span style={{color:C.green,fontFamily:"monospace",fontWeight:700}}>{fmt(r.totalCharge||0)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── HULLING & GRADING MODULE ──────────────────────────────────────
+// Grade keys: outturn (bulk), then individual grades, then husk is auto
+const HULL_GRADES = ["gradeAAA","gradeAA","gradeA","gradeB","gradeC","gradePB","gradeBBB","gradeBits","gradeIDB"];
+const HULL_GRADE_LABELS = {
+  gradeAAA:"Sc.19 AAA", gradeAA:"Sc.18 AA", gradeA:"Sc.17 A",
+  gradeB:"Sc.15 B",   gradeC:"Sc.14 C",  gradePB:"PB (Peaberry)",
+  gradeBBB:"BBB",     gradeBits:"Bits",   gradeIDB:"IDB",
+};
+// Stock item names for grades
+const HULL_GRADE_STOCK = {
+  gradeAAA:"Grade AA", gradeAA:"Grade AA", gradeA:"Grade A",
+  gradeB:"Grade B",    gradeC:"Grade C",   gradePB:"Grade PB",
+  gradeBBB:"Grade BBB",gradeBits:"Bits",   gradeIDB:"Grade C",
+};
+
+function HullingModule({ state, dispatch, role }) {
+  const [showForm, setShowForm]   = useState(false);
+  const [confirmId, setConfirmId] = useState(null);
+  const [form, setForm] = useState({
+    date:today(), grnId:"", partyId:"", coffeeType:"Parchment",
+    inputQty:"", outturnPct:"", curingRate:"", ownership:"own",
+    gradeAAA:"", gradeAA:"", gradeA:"", gradeB:"", gradeC:"",
+    gradePB:"", gradeBBB:"", gradeBits:"", gradeIDB:"",
+    narration:"",
+  });
+  const [err, setErr] = useState("");
+
+  const canPost   = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+  const set = (f,v) => setForm(p=>({...p,[f]:v}));
+
+  // GRNs eligible for hulling
+  const eligibleGRNs = state.grns.filter(g => {
+    const isDryOutput = (g.hasDrying===true||g.hasDrying==="true") && parseFloat(g.dryKg||0)>0;
+    if (isDryOutput && (g.outputType==="Parchment"||g.outputType==="Dry Cherry")) return true;
+    if (g.coffeeType==="Parchment"||g.coffeeType==="Dry Cherry") return true;
+    return false;
+  });
+
+  const selectedGRN   = state.grns.find(g=>g.id===form.grnId);
+  const alreadyHulled = state.hullingJobs.filter(h=>h.grnId===form.grnId).reduce((s,h)=>s+parseFloat(h.inputQty||0),0);
+  const availableQty  = selectedGRN
+    ? (parseFloat(selectedGRN.dryKg||0)>0 ? parseFloat(selectedGRN.dryKg) : parseFloat(selectedGRN.netWeight||0)) - alreadyHulled
+    : 0;
+
+  const inputQty     = parseFloat(form.inputQty||0);
+  const outturnPct   = parseFloat(form.outturnPct||0);
+  const bulkKg       = inputQty>0&&outturnPct>0 ? +(inputQty*outturnPct/100).toFixed(2) : 0;
+  const huskKg       = inputQty>0&&bulkKg>0 ? +(inputQty-bulkKg).toFixed(2) : 0;
+  const curingCharge = +(inputQty * parseFloat(form.curingRate||0)).toFixed(2);
+  const gradeTotal   = HULL_GRADES.reduce((s,g)=>s+parseFloat(form[g]||0),0);
+  const gradeOk      = bulkKg>0 && Math.abs(gradeTotal-bulkKg)<1;
+
+  // QC predicted outturn for comparison
+  const qcOutturn = selectedGRN?.qualityReport?.outturn;
+
+  const submit = () => {
+    if (!form.grnId)       { setErr("Select a GRN"); return; }
+    if (!inputQty||inputQty<=0)     { setErr("Enter input quantity"); return; }
+    if (inputQty > availableQty+0.5){ setErr(`Only ${availableQty.toFixed(2)} kg available from this GRN`); return; }
+    if (!outturnPct||outturnPct<=0) { setErr("Enter outturn %"); return; }
+    if (outturnPct>100)             { setErr("Outturn % cannot exceed 100"); return; }
+    if (!gradeOk)                   { setErr(`Grade total (${gradeTotal.toFixed(2)} kg) must equal bulk/outturn (${bulkKg} kg)`); return; }
+    if (form.ownership==="party"&&!form.partyId) { setErr("Select party"); return; }
+    setErr("");
+    dispatch({type:"ADD_HULLING_JOB", data:{
+      ...form,
+      coffeeType: selectedGRN?.outputType||selectedGRN?.coffeeType||form.coffeeType,
+      inputQty, outturnPct, bulkKg, huskKg, curingCharge,
+      gradeAAA:parseFloat(form.gradeAAA||0), gradeAA:parseFloat(form.gradeAA||0),
+      gradeA:parseFloat(form.gradeA||0),   gradeB:parseFloat(form.gradeB||0),
+      gradeC:parseFloat(form.gradeC||0),   gradePB:parseFloat(form.gradePB||0),
+      gradeBBB:parseFloat(form.gradeBBB||0),gradeBits:parseFloat(form.gradeBits||0),
+      gradeIDB:parseFloat(form.gradeIDB||0),totalOutput:gradeTotal,
+    }});
+    setShowForm(false);
+    setForm({date:today(),grnId:"",partyId:"",coffeeType:"Parchment",inputQty:"",outturnPct:"",curingRate:"",ownership:"own",gradeAAA:"",gradeAA:"",gradeA:"",gradeB:"",gradeC:"",gradePB:"",gradeBBB:"",gradeBits:"",gradeIDB:"",narration:""});
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      {confirmId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 32px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:17,marginBottom:8}}>Delete Hulling Job?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>Stock and curing entries will be reversed.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={()=>{dispatch({type:"DELETE_HULLING_JOB",id:confirmId});setConfirmId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>⚙️ Hulling & Grading</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Parchment / Dry Cherry → Outturn → Coffee Grades</p>
+        </div>
+        {canPost&&<Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Hulling Job</Btn>}
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        {[
+          {icon:"⚙️",label:"Total Jobs",  value:state.hullingJobs.length},
+          {icon:"📦",label:"Total Input", value:state.hullingJobs.reduce((s,h)=>s+parseFloat(h.inputQty||0),0).toLocaleString("en-IN",{maximumFractionDigits:0})+" kg"},
+          {icon:"☕",label:"Total Bulk",  value:state.hullingJobs.reduce((s,h)=>s+parseFloat(h.bulkKg||0),0).toLocaleString("en-IN",{maximumFractionDigits:0})+" kg"},
+          {icon:"💰",label:"Curing Income",value:fmt(state.hullingJobs.reduce((s,h)=>s+parseFloat(h.curingCharge||0),0))},
+        ].map(s=>(
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:130}}>
+            <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:s.color||C.accent,marginTop:4}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Form */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:16,fontSize:16}}>⚙️ New Hulling Job</div>
+          <div style={{display:"flex",flexDirection:"column",gap:16}}>
+
+            {/* Header */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+              <Field label="Date"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
+              <Field label="Select GRN *">
+                <select value={form.grnId} onChange={e=>{
+                  const g=state.grns.find(x=>x.id===e.target.value);
+                  set("grnId",e.target.value);
+                  if(g){set("partyId",g.partyId);set("coffeeType",g.outputType||g.coffeeType);}
+                }} style={{...sh.input,borderColor:!form.grnId?"#f97316":C.border}}>
+                  <option value="">— Select GRN —</option>
+                  {eligibleGRNs.map(g=>{
+                    const party=state.parties[g.partyId];
+                    const ct=g.outputType||g.coffeeType;
+                    const avail=(parseFloat(g.dryKg||0)>0?parseFloat(g.dryKg):parseFloat(g.netWeight||0))-
+                      state.hullingJobs.filter(h=>h.grnId===g.id).reduce((s,h)=>s+parseFloat(h.inputQty||0),0);
+                    if(avail<=0) return null;
+                    return <option key={g.id} value={g.id}>{g.id} · {party?.name||"?"} · {ct} · {avail.toFixed(0)} kg</option>;
+                  }).filter(Boolean)}
+                </select>
+              </Field>
+              <Field label="Ownership">
+                <select value={form.ownership} onChange={e=>set("ownership",e.target.value)} style={sh.input}>
+                  <option value="own">Our Coffee → Dr Curing Expense, Cr Curing Income</option>
+                  <option value="party">Party Coffee → Dr Party, Cr Curing Income</option>
+                </select>
+              </Field>
+              {form.ownership==="party"&&(
+                <Field label="Party">
+                  <select value={form.partyId} onChange={e=>set("partyId",e.target.value)} style={sh.input}>
+                    <option value="">— Select —</option>
+                    {Object.values(state.parties).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </Field>
+              )}
+              <Field label="Narration"><input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+            </div>
+
+            {/* Input, Outturn, Curing */}
+            {form.grnId&&(
+              <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+                <div style={{background:"#f5ede4",padding:"8px 14px",fontWeight:800,fontSize:12,color:C.accent}}>📦 INPUT & OUTTURN</div>
+                <div style={{padding:"14px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12}}>
+                  <Field label={`Input Qty (kg) — max ${availableQty.toFixed(2)} kg`}>
+                    <input type="number" value={form.inputQty} onChange={e=>set("inputQty",e.target.value)}
+                      placeholder="0" style={{...sh.input,borderColor:inputQty>availableQty?C.red:C.border}}/>
+                  </Field>
+                  <Field label="Outturn % (Bulk)">
+                    <input type="number" value={form.outturnPct} onChange={e=>set("outturnPct",e.target.value)} placeholder="0.0" style={sh.input}/>
+                  </Field>
+                  {/* QC comparison */}
+                  {qcOutturn&&outturnPct>0&&(
+                    <div style={{padding:"10px 14px",background:Math.abs(outturnPct-parseFloat(qcOutturn))<2?"#f0fdf4":"#fef9c3",borderRadius:6,alignSelf:"flex-end"}}>
+                      <div style={{fontSize:11,color:C.muted}}>QC Predicted Outturn</div>
+                      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:C.accent}}>{qcOutturn}%</div>
+                      <div style={{fontSize:11,fontWeight:600,color:Math.abs(outturnPct-parseFloat(qcOutturn))<2?C.green:C.red}}>
+                        Actual: {outturnPct}% ({outturnPct>parseFloat(qcOutturn)?"+":""}{(outturnPct-parseFloat(qcOutturn)).toFixed(1)}%)
+                      </div>
+                    </div>
+                  )}
+                  {bulkKg>0&&(
+                    <div style={{padding:"10px 14px",background:"#f0fdf4",borderRadius:6,alignSelf:"flex-end"}}>
+                      <div style={{fontSize:11,color:C.muted}}>Bulk (Coffee Rice)</div>
+                      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.green}}>{bulkKg} kg</div>
+                      <div style={{fontSize:11,color:C.muted}}>Husk/Waste: {huskKg} kg</div>
+                    </div>
+                  )}
+                  <Field label="Curing Rate (₹/kg input)">
+                    <input type="number" value={form.curingRate} onChange={e=>set("curingRate",e.target.value)} placeholder="0.00" style={sh.input}/>
+                  </Field>
+                  {curingCharge>0&&(
+                    <div style={{padding:"10px 14px",background:form.ownership==="party"?"#eff6ff":"#f0fdf4",borderRadius:6,alignSelf:"flex-end"}}>
+                      <div style={{fontSize:11,color:C.muted}}>Curing Charge</div>
+                      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:form.ownership==="party"?C.blue:C.green}}>{fmt(curingCharge)}</div>
+                      <div style={{fontSize:10,color:C.muted,marginTop:2}}>
+                        {form.ownership==="party"?"Dr Party, Cr Curing Income":"Dr Curing Expense, Cr Curing Income"}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Grade outputs */}
+            {bulkKg>0&&(
+              <div style={{border:`2px solid ${gradeOk?"#22c55e":"#e8ddd0"}`,borderRadius:8,overflow:"hidden"}}>
+                <div style={{background:"#f5ede4",padding:"8px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontWeight:800,fontSize:12,color:C.accent}}>🏷 GRADE OUTPUTS (must total {bulkKg} kg)</span>
+                  <span style={{fontSize:12,fontWeight:700,color:gradeOk?C.green:C.red}}>
+                    {gradeTotal.toFixed(2)} / {bulkKg} kg {gradeOk?"✓":"⚠"}
+                  </span>
+                </div>
+                <div style={{padding:"14px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:10}}>
+                  {HULL_GRADES.map(g=>{
+                    const qcKey = {gradeAAA:"sc19AAA",gradeAA:"sc18AA",gradeA:"sc17A",gradeB:"sc15B",gradeC:"sc14C",gradePB:"pb",gradeBBB:"bbb",gradeBits:"bits",gradeIDB:"idb"}[g];
+                    const qcPct = selectedGRN?.qualityReport?.[qcKey];
+                    const qcKg  = qcPct&&bulkKg ? (parseFloat(qcPct)/100*bulkKg).toFixed(1) : null;
+                    return(
+                      <Field key={g} label={HULL_GRADE_LABELS[g]}>
+                        <input type="number" value={form[g]} onChange={e=>set(g,e.target.value)} placeholder="0"
+                          style={{...sh.input,borderColor:parseFloat(form[g]||0)>0?C.accent:C.border}}/>
+                        {qcKg&&<div style={{fontSize:10,color:C.muted,marginTop:2}}>QC predicted: {qcKg} kg ({qcPct}%)</div>}
+                      </Field>
+                    );
+                  })}
+                </div>
+                {/* Auto husk */}
+                <div style={{padding:"8px 16px 12px",background:"#fdf8f4",fontSize:12,color:C.muted}}>
+                  Husk/Waste: <strong>{huskKg} kg</strong> (auto = input {inputQty} kg − bulk {bulkKg} kg) — not graded
+                </div>
+              </div>
+            )}
+
+            {err&&<div style={{color:C.red,fontWeight:700,fontSize:13,padding:"8px 12px",background:"#fee2e2",borderRadius:6}}>{err}</div>}
+            <div style={{display:"flex",gap:10}}>
+              <Btn onClick={submit} variant="success" size="lg">✓ Save Hulling Job</Btn>
+              <Btn onClick={()=>{setShowForm(false);setErr("");}} variant="ghost">Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Jobs list */}
+      {state.hullingJobs.length===0?(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:40,marginBottom:8}}>⚙️</div>No hulling jobs yet.
+        </div>
+      ):state.hullingJobs.map(h=>{
+        const party=state.parties[h.partyId];
+        const grn=state.grns.find(g=>g.id===h.grnId);
+        return(
+          <div key={h.id} style={{...sh.card}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
+              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+                <span style={{background:C.accent+"18",color:C.accent,border:`1px solid ${C.accent}33`,padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{h.id}</span>
+                <span style={{fontSize:13,color:C.muted}}>{h.date}</span>
+                <span style={{fontWeight:700,color:C.text}}>{h.ownership==="party"?party?.name:"Own Coffee"}</span>
+                <span style={{fontSize:12,background:"#fdf4ff",color:"#7c3aed",padding:"2px 8px",borderRadius:4,fontWeight:600}}>{h.coffeeType}</span>
+                {h.grnId&&<span style={{fontSize:11,color:C.muted}}>← {h.grnId}</span>}
+              </div>
+              <div style={{display:"flex",gap:16,alignItems:"center"}}>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"monospace",fontWeight:800,color:C.accent}}>{parseFloat(h.inputQty||0).toLocaleString("en-IN")} kg in → {parseFloat(h.bulkKg||0).toLocaleString("en-IN")} kg bulk ({h.outturnPct}%)</div>
+                  <div style={{fontSize:12,color:C.muted}}>Husk: {parseFloat(h.huskKg||0).toLocaleString("en-IN")} kg · Curing: {fmt(h.curingCharge||0)}</div>
+                </div>
+                {canDelete&&<Btn size="sm" variant="danger" onClick={()=>setConfirmId(h.id)}>🗑</Btn>}
+              </div>
+            </div>
+            {/* Grade summary */}
+            <div style={{marginTop:10,display:"flex",gap:6,flexWrap:"wrap",paddingTop:8,borderTop:`1px solid ${C.border}`}}>
+              {HULL_GRADES.map(g=>{
+                const qty=parseFloat(h[g]||0);
+                if(!qty) return null;
+                return(
+                  <div key={g} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 10px",textAlign:"center"}}>
+                    <div style={{fontSize:10,fontWeight:700,color:C.accent}}>{HULL_GRADE_LABELS[g]}</div>
+                    <div style={{fontFamily:"monospace",fontWeight:800,fontSize:12,color:C.green}}>{qty.toLocaleString("en-IN",{maximumFractionDigits:1})} kg</div>
+                  </div>
+                );
+              }).filter(Boolean)}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── SALES MODULE ──────────────────────────────────────────────────
+function SalesModule({ state, dispatch, role }) {
+  const [showForm, setShowForm]     = useState(false);
+  const [confirmId, setConfirmId]   = useState(null);
+  const [form, setForm] = useState({
+    date:today(), buyerId:"", sourceType:"hulling", sourceId:"",
+    narration:"", items:[],
+  });
+  const [err, setErr] = useState("");
+  const canPost   = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+  const set = (f,v) => setForm(p=>({...p,[f]:v}));
+
+  // Buyers = customer type parties
+  const buyers = Object.values(state.parties).filter(p=>p.partyType==="customer");
+
+  // Sources: hulling jobs or GRNs with available stock
+  const hullingSources = state.hullingJobs.map(h => {
+    const party = state.parties[h.partyId];
+    const alreadySold = (state.sales||[]).filter(s=>s.sourceId===h.id)
+      .flatMap(s=>s.items||[])
+      .reduce((acc,it)=>{ acc[it.grade]=(acc[it.grade]||0)+parseFloat(it.qty||0); return acc; },{});
+    const available = {};
+    HULL_GRADES.forEach(g => {
+      const total = parseFloat(h[g]||0);
+      const sold  = alreadySold[HULL_GRADE_LABELS[g]]||0;
+      if (total-sold > 0) available[HULL_GRADE_LABELS[g]] = +(total-sold).toFixed(2);
+    });
+    return { id:h.id, label:`${h.id} · ${party?.name||"?"} · ${h.coffeeType}`, available, type:"hulling" };
+  }).filter(s=>Object.keys(s.available).length>0);
+
+  const grnSources = state.grns.filter(g => {
+    const ct = g.coffeeType;
+    const isDry = (g.hasDrying===true||g.hasDrying==="true") && parseFloat(g.dryKg||0)>0;
+    const isHulled = state.hullingJobs.some(h=>h.grnId===g.id);
+    if (isHulled) return false; // hulled GRNs use hulling source
+    if (isDry) return true; // dried output
+    if (ct==="Parchment"||ct==="Dry Cherry"||ct==="Others") return true;
+    return false;
+  }).map(g => {
+    const party = state.parties[g.partyId];
+    const ct = g.outputType||g.coffeeType;
+    const totalQty = parseFloat(g.dryKg||0)>0 ? parseFloat(g.dryKg) : parseFloat(g.netWeight||0);
+    const soldQty = (state.sales||[]).filter(s=>s.sourceId===g.id)
+      .flatMap(s=>s.items||[]).reduce((t,it)=>t+parseFloat(it.qty||0),0);
+    const available = { [ct]: +(totalQty-soldQty).toFixed(2) };
+    return { id:g.id, label:`${g.id} · ${party?.name||"?"} · ${ct}`, available, type:"grn" };
+  }).filter(s=>Object.values(s.available).some(v=>v>0));
+
+  const allSources = [...hullingSources, ...grnSources];
+  const selectedSource = allSources.find(s=>s.id===form.sourceId);
+
+  // Add item row
+  const addItem = () => setForm(p=>({...p, items:[...p.items,{grade:"",qty:"",rateType:"per_kg",rate:"",amount:""}]}));
+  const setItem = (i,f,v) => setForm(p=>({...p, items:p.items.map((it,idx)=>{
+    if(idx!==i) return it;
+    const upd = {...it,[f]:v};
+    if (f==="qty"||f==="rate") upd.amount = (parseFloat(f==="qty"?v:upd.qty)||0)*(parseFloat(f==="rate"?v:upd.rate)||0);
+    if (f==="amount"&&upd.rateType==="total") upd.rate="";
+    return upd;
+  })}));
+  const removeItem = (i) => setForm(p=>({...p,items:p.items.filter((_,idx)=>idx!==i)}));
+
+  const totalAmount = form.items.reduce((s,it)=>s+parseFloat(it.amount||0),0);
+
+  const submit = () => {
+    if (!form.buyerId)   { setErr("Select a buyer"); return; }
+    if (!form.sourceId)  { setErr("Select source (hulling job or GRN)"); return; }
+    if (!form.items.length){ setErr("Add at least one item"); return; }
+    for (const it of form.items) {
+      if (!it.grade)     { setErr("Select grade/type for all items"); return; }
+      if (!it.qty||parseFloat(it.qty)<=0){ setErr("Enter qty for all items"); return; }
+      if (!it.amount||parseFloat(it.amount)<=0){ setErr("Enter amount for all items"); return; }
+      const avail = selectedSource?.available[it.grade]||0;
+      if (parseFloat(it.qty)>avail+0.5){ setErr(`${it.grade}: only ${avail} kg available`); return; }
+    }
+    setErr("");
+    dispatch({type:"ADD_SALE",data:{
+      ...form,
+      sourceType: selectedSource?.type||"hulling",
+      totalAmount,
+      items: form.items.map(it=>({...it,qty:parseFloat(it.qty),amount:parseFloat(it.amount),rate:parseFloat(it.rate||0)})),
+    }});
+    setShowForm(false);
+    setForm({date:today(),buyerId:"",sourceType:"hulling",sourceId:"",narration:"",items:[]});
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      {confirmId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 32px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:17,marginBottom:8}}>Delete Sale?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>Buyer account and sales voucher will be reversed.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={()=>{dispatch({type:"DELETE_SALE",id:confirmId});setConfirmId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>🏷 Sales</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Traceable sales linked to Hulling Jobs / GRNs</p>
+        </div>
+        {canPost&&<Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Sale</Btn>}
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        {[
+          {icon:"🏷",label:"Total Sales",   value:(state.sales||[]).length},
+          {icon:"💰",label:"Total Value",   value:fmt((state.sales||[]).reduce((s,x)=>s+parseFloat(x.totalAmount||0),0))},
+          {icon:"📦",label:"Total Qty",     value:(state.sales||[]).reduce((s,x)=>(x.items||[]).reduce((t,it)=>t+parseFloat(it.qty||0),s),0).toLocaleString("en-IN",{maximumFractionDigits:0})+" kg"},
+        ].map(s=>(
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:150}}>
+            <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.accent,marginTop:4}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Form */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:16,fontSize:16}}>🏷 New Sale</div>
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
+              <Field label="Date"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
+              <Field label="Buyer *">
+                <select value={form.buyerId} onChange={e=>set("buyerId",e.target.value)} style={{...sh.input,borderColor:!form.buyerId?"#f97316":C.border}}>
+                  <option value="">— Select Buyer —</option>
+                  {buyers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                  {buyers.length===0&&<option disabled>No customers — add in Parties tab</option>}
+                </select>
+              </Field>
+              <Field label="Source (Hulling Job / GRN) *">
+                <select value={form.sourceId} onChange={e=>{set("sourceId",e.target.value);set("items",[]);}} style={{...sh.input,borderColor:!form.sourceId?"#f97316":C.border}}>
+                  <option value="">— Select Source —</option>
+                  {hullingSources.length>0&&<optgroup label="⚙️ Hulling Jobs">
+                    {hullingSources.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
+                  </optgroup>}
+                  {grnSources.length>0&&<optgroup label="📋 GRNs (direct)">
+                    {grnSources.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
+                  </optgroup>}
+                </select>
+              </Field>
+              <Field label="Narration"><input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+            </div>
+
+            {/* Available stock from source */}
+            {selectedSource&&(
+              <div style={{padding:"10px 14px",background:"#f0fdf4",borderRadius:8,fontSize:12}}>
+                <div style={{fontWeight:700,color:C.green,marginBottom:6}}>Available stock from {form.sourceId}:</div>
+                <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                  {Object.entries(selectedSource.available).map(([grade,qty])=>(
+                    <span key={grade} style={{background:"#dcfce7",color:C.green,padding:"3px 10px",borderRadius:10,fontFamily:"monospace",fontWeight:700}}>
+                      {grade}: {qty.toLocaleString("en-IN")} kg
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Items */}
+            {selectedSource&&(
+              <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+                <div style={{background:"#f5ede4",padding:"8px 14px",fontWeight:800,fontSize:12,color:C.accent}}>🏷 SALE ITEMS</div>
+                <div style={{padding:"12px 14px",display:"flex",flexDirection:"column",gap:8}}>
+                  {form.items.map((it,i)=>(
+                    <div key={i} style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr auto",gap:8,alignItems:"end"}}>
+                      <Field label={i===0?"Grade / Type":""}>
+                        <select value={it.grade} onChange={e=>setItem(i,"grade",e.target.value)} style={sh.input}>
+                          <option value="">— Select —</option>
+                          {Object.entries(selectedSource.available).map(([g,avail])=>(
+                            <option key={g} value={g}>{g} ({avail} kg avail)</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label={i===0?"Qty (kg)":""}>
+                        <input type="number" value={it.qty} onChange={e=>setItem(i,"qty",e.target.value)} placeholder="0" style={sh.input}/>
+                      </Field>
+                      <Field label={i===0?"Rate Type":""}>
+                        <select value={it.rateType} onChange={e=>setItem(i,"rateType",e.target.value)} style={sh.input}>
+                          <option value="per_kg">Per kg</option>
+                          <option value="total">Total value</option>
+                        </select>
+                      </Field>
+                      <Field label={i===0?"Rate (₹)":""}>
+                        <input type="number" value={it.rate} onChange={e=>setItem(i,"rate",e.target.value)} placeholder="0.00" style={sh.input} disabled={it.rateType==="total"}/>
+                      </Field>
+                      <Field label={i===0?"Amount (₹)":""}>
+                        <input type="number" value={it.amount} onChange={e=>setItem(i,"amount",e.target.value)} placeholder="0.00" style={sh.input}/>
+                      </Field>
+                      <button onClick={()=>removeItem(i)} style={{background:C.red,color:"#fff",border:"none",borderRadius:6,padding:"8px 10px",cursor:"pointer",alignSelf:"flex-end",marginBottom:1}}>✕</button>
+                    </div>
+                  ))}
+                  <Btn onClick={addItem} variant="outline" size="sm">+ Add Item</Btn>
+                  {form.items.length>0&&(
+                    <div style={{padding:"10px 14px",background:"#f0fdf4",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontWeight:700}}>Total Sale Value</span>
+                      <span style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.green}}>{fmt(totalAmount)}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {err&&<div style={{color:C.red,fontWeight:700,fontSize:13,padding:"8px 12px",background:"#fee2e2",borderRadius:6}}>{err}</div>}
+            <div style={{display:"flex",gap:10}}>
+              <Btn onClick={submit} variant="success" size="lg">✓ Save Sale</Btn>
+              <Btn onClick={()=>{setShowForm(false);setErr("");}} variant="ghost">Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sales list */}
+      {(state.sales||[]).length===0?(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:40,marginBottom:8}}>🏷</div>No sales recorded yet.
+        </div>
+      ):(state.sales||[]).map(sale=>{
+        const buyer  = state.parties[sale.buyerId];
+        const source = allSources.find(s=>s.id===sale.sourceId)||{label:sale.sourceId};
+        return(
+          <div key={sale.id} style={{...sh.card}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
+              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+                <span style={{background:C.accent+"18",color:C.accent,border:`1px solid ${C.accent}33`,padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{sale.id}</span>
+                <span style={{fontSize:13,color:C.muted}}>{sale.date}</span>
+                <span style={{fontWeight:700,color:C.text}}>{buyer?.name||"Unknown"}</span>
+                <span style={{fontSize:11,color:C.muted}}>← {sale.sourceId}</span>
+                {sale.narration&&<span style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>{sale.narration}</span>}
+              </div>
+              <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.green}}>{fmt(sale.totalAmount||0)}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{(sale.items||[]).reduce((s,it)=>s+parseFloat(it.qty||0),0).toLocaleString("en-IN")} kg total</div>
+                </div>
+                {canDelete&&<Btn size="sm" variant="danger" onClick={()=>setConfirmId(sale.id)}>🗑</Btn>}
+              </div>
+            </div>
+            <div style={{marginTop:10,display:"flex",gap:6,flexWrap:"wrap",paddingTop:8,borderTop:`1px solid ${C.border}`}}>
+              {(sale.items||[]).map((it,i)=>(
+                <div key={i} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 12px",fontSize:12}}>
+                  <span style={{fontWeight:700,color:C.accent}}>{it.grade}</span>
+                  <span style={{color:C.muted,margin:"0 4px"}}>·</span>
+                  <span style={{fontFamily:"monospace",fontWeight:600}}>{parseFloat(it.qty||0).toLocaleString("en-IN")} kg</span>
+                  {it.rate>0&&<span style={{color:C.muted,marginLeft:4}}>@ ₹{it.rate}/kg</span>}
+                  <span style={{color:C.green,marginLeft:4,fontFamily:"monospace",fontWeight:700}}>{fmt(it.amount||0)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── APP ───────────────────────────────────────────────────────────
+const NAV=[
+  {id:"dashboard", label:"Dashboard",    icon:"🏠"},
+  {id:"grn",       label:"Purchase GRN", icon:"📋"},
+  {id:"hulling",   label:"Hulling",      icon:"⚙️"},
+  {id:"sales",     label:"Sales",        icon:"🏷"},
+  {id:"storage",   label:"Party Storage",icon:"🏭"},
+  {id:"daybook",   label:"Day Book",     icon:"📓"},
+  {id:"ledger",    label:"Ledger",       icon:"📒"},
+  {id:"pl",        label:"Profit & Loss",icon:"📈", adminOnly:true},
+  {id:"trial",     label:"Trial Balance",icon:"⚖️"},
+  {id:"stock",     label:"Stock",        icon:"☕"},
+  {id:"parties",   label:"Parties",      icon:"👥"},
+  {id:"accounts",  label:"Accounts",     icon:"🗂"},
+  {id:"masters",   label:"Masters",      icon:"🗂️", adminOnly:true},
+  {id:"users",     label:"Users",        icon:"👤", adminOnly:true},
+];
+
+export default function App() {
+  const [tab, setTab]               = useState("dashboard");
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading]       = useState(false);
+  const [saving, setSaving]         = useState(false);
+  const [error, setError]           = useState("");
+
+  // ── ALL DATA FROM SUPABASE ───────────────────────────────────
+  const [accounts,   setAccounts]   = useState({});
+  const [parties,    setParties]    = useState({});
+  const [vouchers,   setVouchers]   = useState([]);
+  const [stockItems, setStockItems] = useState([]);
+  const [grns,       setGRNs]       = useState([]);
+  const [users,      setUsers]      = useState([]);
+  const [warehouses,   setWarehouses]   = useState([]);
+  const [locations,    setLocations]    = useState([]);
+  const [coffeeTypes,  setCoffeeTypes]  = useState([]);
+  const [dryingJobs,   setDryingJobs]   = useState([]);
+  const [storageLots,  setStorageLots]  = useState([]);
+  const [storageReleases, setStorageReleases] = useState([]);
+  const [hullingJobs,  setHullingJobs]  = useState([]);
+  const [sales,        setSales]        = useState([]);
+
+  // Compute stock from vouchers (no separate stock table needed)
+  const stock = useMemo(() => {
+    const s = {};
+    // GRN IDs that have drying OR hulling — their PuV vouchers should NOT add to stock
+    const dryingGrnRefs = new Set(
+      grns.filter(g => (g.hasDrying===true||g.hasDrying==="true") && parseFloat(g.dryKg||0)>0)
+          .map(g => g.id)
+    );
+    const hulledGrnRefs = new Set(
+      (hullingJobs||[]).map(h => h.grnId).filter(Boolean)
+    );
+
+    // From purchase vouchers only (SV handled by sales records below)
+    vouchers.forEach(v => {
+      const items = v.items || [];
+      const vt = v.voucherType || v.voucher_type;
+      if (vt !== "PuV") return; // Only PuV adds stock here
+      if (v.reference && (dryingGrnRefs.has(v.reference)||hulledGrnRefs.has(v.reference))) return;
+      items.forEach(it => {
+        if (!it.itemName) return;
+        s[it.itemName] = (s[it.itemName]||0) + parseFloat(it.qty||0);
+      });
+    });
+
+
+    // From GRNs — net weight into stock, handle drying/hulling
+    const DRYING_OUTPUT = {"Wet Parchment":"Parchment","Raw Cherry":"Dry Cherry"};
+    const hulledGrnSet  = new Set((hullingJobs||[]).map(h=>h.grnId).filter(Boolean));
+    grns.forEach(g => {
+      if (!g.coffeeType || !g.netWeight) return;
+      // If fully hulled, skip — hulling job handles stock
+      if (hulledGrnSet.has(g.id)) return;
+      const netWt  = parseFloat(g.netWeight||0);
+      const dryKg  = parseFloat(g.dryKg||0);
+      const hasDry = g.hasDrying===true || g.hasDrying==="true" || g.hasDrying===1;
+      const ct     = (g.coffeeType||"").trim();
+      if (hasDry && dryKg>0) {
+        const outputType = (g.outputType||"").trim() || DRYING_OUTPUT[ct] || ct;
+        s[outputType] = (s[outputType]||0) + dryKg;
+      } else if (hasDry && !dryKg) {
+        s[ct] = (s[ct]||0) + netWt;
+      } else {
+        s[ct] = (s[ct]||0) + netWt;
+      }
+    });
+    // From Hulling jobs — input out, grades in
+    (hullingJobs||[]).forEach(h => {
+      if (!h.coffeeType || !h.inputQty) return;
+      // Input coffee type goes OUT
+      s[h.coffeeType] = (s[h.coffeeType]||0) - parseFloat(h.inputQty||0);
+      // Husk is waste — not in stock
+      // Grades come IN
+      const grades = {
+        "Grade AA":  (parseFloat(h.gradeAAA||0)+parseFloat(h.gradeAA||0)), // AAA+AA both go to Grade AA stock
+        "Grade A":   parseFloat(h.gradeA||0),
+        "Grade B":   parseFloat(h.gradeB||0),
+        "Grade C":   (parseFloat(h.gradeC||0)+parseFloat(h.gradeIDB||0)), // C+IDB
+        "Grade PB":  parseFloat(h.gradePB||0),
+        "Grade BBB": parseFloat(h.gradeBBB||0),
+        "Bits":      parseFloat(h.gradeBits||0),
+      };
+      Object.entries(grades).forEach(([grade,qty])=>{
+        if (qty>0) s[grade] = (s[grade]||0) + qty;
+      });
+    });
+    // From Sales records — reduce stock for each sold item
+    (sales||[]).forEach(sale => {
+      (sale.items||[]).forEach(it => {
+        if (!it.grade || !it.qty) return;
+        s[it.grade] = (s[it.grade]||0) - parseFloat(it.qty||0);
+      });
+    });
+
+    return s;
+  }, [vouchers, grns, hullingJobs, sales]);
+
+  // ── LOAD ALL DATA ON LOGIN ────────────────────────────────────
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [accs, parts, vouchs, sitems, grnList, userList, whs, locs, ctypes, dryList, storList, relList, hullList, salesList] = await Promise.all([
+        db.getAccounts(), db.getParties(), db.getVouchers(), db.getStockItems(),
+        db.getGRNs(), db.getUsers(), db.getWarehouses(), db.getLocations(),
+        db.getCoffeeTypes(), db.getDryingJobs(), db.getStorageLots(),
+        db.getStorageReleases(), db.getHullingJobs(), db.getSales(),
+      ]);
+      // Columns are now camelCase in DB after migration
+      const accsObj = {};
+      (accs||[]).forEach(a => {
+        accsObj[a.id] = {
+          ...a,
+          isParty:       a.isParty       ?? a.is_party       ?? false,
+          isBankAccount: a.isBankAccount ?? a.is_bank_account ?? false,
+          accountNo:     a.accountNo     || a.account_no     || "",
+        };
+      });
+      setAccounts(accsObj);
+      const partsObj = {};
+      (parts||[]).forEach(p => { partsObj[p.id] = p; });
+      setParties(partsObj);
+      const normalized = (vouchs||[]).map(v=>({
+        ...v,
+        entries:  v.entries||[],
+        items:    v.items||[],
+        postedAt: v.posted_at,
+        editedAt: v.edited_at,
+      }));
+      setVouchers(normalized);
+      setStockItems(sitems||[]);
+      // GRNs - all columns are camelCase in DB
+      setGRNs(grnList||[]);
+      setUsers(userList||[]);
+      setWarehouses(whs||[]);
+      setLocations(locs||[]);
+      setCoffeeTypes(ctypes||[]);
+      setDryingJobs(dryList||[]);
+      setStorageLots(storList||[]);
+      setStorageReleases(relList||[]);
+      setHullingJobs(hullList||[]);
+      setSales(salesList||[]);
+    } catch(e) {
+      setError("Failed to load data: " + e.message);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { if (currentUser) loadAll(); }, [currentUser, loadAll]);
+
+  // ── COMPUTE ACCURATE BALANCES FROM VOUCHERS ──────────────────
+  const accurateAccounts = useMemo(() => {
+    const bal = {};
+    vouchers.forEach(v => {
+      (v.entries||[]).forEach(e => {
+        if (!e.accountId || !accounts[e.accountId]) return;
+        const acc = accounts[e.accountId];
+        const dr = parseFloat(e.dr||0), cr = parseFloat(e.cr||0);
+        const isDebitNormal = ["asset","expense"].includes(acc.type);
+        bal[e.accountId] = (bal[e.accountId]||0) + (isDebitNormal ? dr-cr : cr-dr);
+      });
+    });
+    // Return accounts map with computed balance overriding DB balance
+    const result = {};
+    Object.values(accounts).forEach(a => {
+      result[a.id] = { ...a, balance: bal[a.id]||0 };
+    });
+    return result;
+  }, [accounts, vouchers]);
+
+  // ── BUILD STATE SHAPE compatible with all existing components ─
+  const state = {
+    accounts: accurateAccounts, parties, vouchers, stockItems, grns, users, stock,
+    warehouses, locations, coffeeTypes, dryingJobs, storageLots, storageReleases,
+    hullingJobs, sales,
+    nextVoucherNo:{RV:1,PV:1,CV:1,JV:1,SV:1,PuV:1},
+    nextId:1, nextGRN:1,
+  };
+
+  // ── DISPATCH — now async, calls Supabase then refreshes ───────
+  const dispatch = useCallback(async (action) => {
+    setSaving(true);
+    setError("");
+    try {
+      switch(action.type) {
+
+        // ── MASTERS ────────────────────────────────────────────
+        case "ADD_WAREHOUSE":    await db.addWarehouse(action.name);              break;
+        case "EDIT_WAREHOUSE":   await db.editWarehouse(action.id, action.name);  break;
+        case "DELETE_WAREHOUSE": await db.deleteWarehouse(action.id);             break;
+        case "ADD_LOCATION":     await db.addLocation(action.name);               break;
+        case "EDIT_LOCATION":    await db.editLocation(action.id, action.name);   break;
+        case "DELETE_LOCATION":  await db.deleteLocation(action.id);              break;
+        case "ADD_COFFEE_TYPE":  await db.addCoffeeType(action.name);             break;
+        case "EDIT_COFFEE_TYPE": await db.editCoffeeType(action.id, action.name); break;
+        case "DELETE_COFFEE_TYPE":await db.deleteCoffeeType(action.id);           break;
+
+        // ── SAFE DELETE ─────────────────────────────────────────
+        case "DELETE_PARTY":   await db.deleteParty(action.id, vouchers, grns);   break;
+        case "DELETE_ACCOUNT": await db.deleteAccount(action.id, vouchers, grns); break;
+
+        // ── DRYING JOBS ─────────────────────────────────────────
+        case "ADD_DRYING_JOB": {
+          const seq = await db.getDryingSeq();
+          const id = `DRY-${String(seq).padStart(4,"0")}`;
+          await db.incDryingSeq(seq);
+          await db.addDryingJob({ id, ...action.data });
+          // Auto-post receipt voucher for drying charges if party selected
+          if (action.data.partyId && parseFloat(action.data.totalCharge||0) > 0) {
+            const vSeq = await db.getSeq("RV");
+            const vId = `RV-${String(vSeq).padStart(4,"0")}`;
+            await db.incSeq("RV", vSeq);
+            const entries = [
+              { accountId: action.data.partyId, dr: action.data.totalCharge, cr: 0, narration: `Drying charges - ${id}` },
+              { accountId: "drying",             dr: 0, cr: action.data.totalCharge, narration: `Drying charges - ${id}` },
+            ];
+            await db.addVoucher({ id:vId, voucherType:"RV", date:action.data.date, narration:`Drying charges for ${id}`, reference:id, entries, items:[] });
+            await db.applyEntries(accounts, entries, 1);
+          }
+          break;
+        }
+        case "DELETE_DRYING_JOB": await db.deleteDryingJob(action.id); break;
+
+        // ── STORAGE LOTS ────────────────────────────────────────
+        case "ADD_STORAGE_LOT": {
+          const seq = await db.getStorageSeq();
+          const id = `STR-${String(seq).padStart(4,"0")}`;
+          await db.incStorageSeq(seq);
+          await db.addStorageLot({ id, ...action.data });
+          break;
+        }
+        case "DELETE_STORAGE_LOT": await db.deleteStorageLot(action.id); break;
+        case "RELEASE_STORAGE": {
+          const seq = await db.getStorageSeq();
+          const id = `REL-${String(seq).padStart(4,"0")}`;
+          await db.incStorageSeq(seq);
+          // Check if lot fully released
+          const lot = storageLots.find(l=>l.id===action.data.lotId);
+          const prevReleased = storageReleases.filter(r=>r.lotId===action.data.lotId).reduce((s,r)=>s+parseFloat(r.quantityReleased||0),0);
+          const totalReleased = prevReleased + parseFloat(action.data.quantityReleased||0);
+          const newStatus = totalReleased >= parseFloat(lot?.quantity||0) ? "released" : "partially_released";
+          await db.addStorageRelease({ id, ...action.data });
+          await db.updateStorageStatus(action.data.lotId, newStatus);
+          // Post charge voucher if applicable
+          if (parseFloat(action.data.totalCharge||0) > 0 && action.data.partyId) {
+            const vSeq = await db.getSeq("RV");
+            const vId = `RV-${String(vSeq).padStart(4,"0")}`;
+            await db.incSeq("RV", vSeq);
+            const entries = [
+              { accountId: action.data.partyId, dr: action.data.totalCharge, cr: 0, narration: `Storage/drying charges - ${id}` },
+              { accountId: "drying",             dr: 0, cr: action.data.totalCharge, narration: `Storage charges - ${id}` },
+            ];
+            await db.addVoucher({ id:vId, voucherType:"RV", date:action.data.date, narration:`Storage charges for ${id}`, reference:id, entries, items:[] });
+            await db.applyEntries(accounts, entries, 1);
+          }
+          break;
+        }
+        case "EDIT_USER":   await db.editUser(action.id, action.data); break;
+        case "DELETE_USER": await db.deleteUser(action.id);  break;
+
+        // ── HULLING JOBS ────────────────────────────────────────
+        case "ADD_HULLING_JOB": {
+          const seq = await db.getHullingSeq();
+          const id = `HUL-${String(seq).padStart(4,"0")}`;
+          await db.incHullingSeq(seq);
+          const d = action.data;
+          await db.addHullingJob({ id, ...d });
+          if (parseFloat(d.curingCharge||0)>0) {
+            const vSeq = await db.getSeq("JV");
+            const vId = `JV-${String(vSeq).padStart(4,"0")}`;
+            await db.incSeq("JV", vSeq);
+            let entries;
+            if (d.ownership==="party") {
+              // Party coffee → Dr Party, Cr Curing Income
+              entries = [
+                {accountId:d.partyId,       dr:d.curingCharge, cr:0,             narration:`Curing charges - ${id}`},
+                {accountId:"curing",         dr:0,              cr:d.curingCharge, narration:`Curing income - ${id}`},
+              ];
+            } else {
+              // Our coffee → Dr Curing Expense, Cr Curing Income
+              entries = [
+                {accountId:"curing_expense", dr:d.curingCharge, cr:0,             narration:`Curing expense - ${id}`},
+                {accountId:"curing",         dr:0,              cr:d.curingCharge, narration:`Curing income - ${id}`},
+              ];
+            }
+            await db.addVoucher({id:vId,voucherType:"JV",date:d.date,narration:`Curing charges ${id} (${d.inputQty}kg × ₹${d.curingRate})`,reference:id,entries,items:[]});
+            await db.applyEntries(accounts,entries,1);
+          }
+          break;
+        }
+        case "DELETE_HULLING_JOB": await db.deleteHullingJob(action.id); break;
+
+        // ── SALES ────────────────────────────────────────────────
+        case "ADD_SALE": {
+          const seq = await db.getSalesSeq();
+          const id = `SAL-${String(seq).padStart(4,"0")}`;
+          await db.incSalesSeq(seq);
+          const d = action.data;
+          await db.addSale({ id, ...d });
+          // Post Sales voucher: Dr Buyer, Cr Sales
+          const vSeq = await db.getSeq("SV");
+          const vId = `SV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("SV", vSeq);
+          const entries = [
+            {accountId:d.buyerId, dr:d.totalAmount, cr:0,           narration:`Sales - ${id}`},
+            {accountId:"sales",   dr:0,             cr:d.totalAmount, narration:`Sales - ${id}`},
+          ];
+          const items = d.items.map(it=>({itemName:it.grade,qty:it.qty,unit:"kg",rate:it.rate||0,amount:it.amount}));
+          await db.addVoucher({id:vId,voucherType:"SV",date:d.date,narration:`Sales ${id}${d.narration?` - ${d.narration}`:""}`,reference:id,entries,items});
+          await db.applyEntries(accounts,entries,1);
+          break;
+        }
+        case "DELETE_SALE": await db.deleteSale(action.id); break;
+
+        // ── ACCOUNTS ───────────────────────────────────────────
+        case "ADD_ACCOUNT": {
+          const id = "acc_" + Date.now();
+          await db.addAccount({ id, ...action.data, balance:0 });
+          break;
+        }
+
+        // ── PARTIES ────────────────────────────────────────────
+        case "ADD_PARTY": {
+          const id = "party_" + Date.now();
+          const isCustomer = action.data.partyType === "customer";
+          await db.addParty({ id, ...action.data });
+          try {
+            await db.addAccount({
+              id,
+              name:    action.data.name,
+              balance: 0,
+              isParty: true,
+              "group": isCustomer ? "Debtors" : "Creditors",
+              type:    isCustomer ? "asset"   : "liability",
+            });
+          } catch(e) {
+            console.error("Party account creation failed:", e.message);
+            // Try alternate insert with explicit group key
+            await sb("POST","cv_accounts",{body:{
+              id,
+              name:    action.data.name,
+              balance: 0,
+              isParty: true,
+              group:   isCustomer ? "Debtors" : "Creditors",
+              type:    isCustomer ? "asset"   : "liability",
+            }});
+          }
+          break;
+        }
+        case "EDIT_PARTY": {
+          const isCustomer = action.data.partyType === "customer";
+          await db.editParty(action.id, action.data);
+          await db.patchBalance(action.id, accounts[action.id]?.balance||0); // keep balance
+          // Update account group/type too
+          await sb("PATCH","cv_accounts",{
+            body:{
+              name: action.data.name,
+              group: isCustomer?"Debtors":"Creditors",
+              type:  isCustomer?"asset":"liability",
+            },
+            q:`?id=eq.${action.id}`
+          });
+          break;
+        }
+
+        // ── STOCK ITEMS ────────────────────────────────────────
+        case "ADD_STOCK_ITEM":
+          await db.addStockItem(action.name); break;
+        case "EDIT_STOCK_ITEM":
+          await db.renameStockItem(action.oldName, action.newName); break;
+        case "DELETE_STOCK_ITEM":
+          await db.deleteStockItem(action.name); break;
+
+        // ── VOUCHERS ───────────────────────────────────────────
+        case "POST_VOUCHER": {
+          const vt = action.data.voucherType;
+          const nextNo = await db.getSeq(vt);
+          const id = `${vt}-${String(nextNo).padStart(4,"0")}`;
+          await db.incSeq(vt, nextNo);
+          await db.addVoucher({
+            id,
+            voucherType: vt,
+            date: action.data.date,
+            narration: action.data.narration||"",
+            reference: action.data.reference||"",
+            entries: action.data.entries||[],
+            items: action.data.items||[],
+          });
+          await db.applyEntries(accounts, action.data.entries||[], 1);
+          break;
+        }
+        case "DELETE_VOUCHER": {
+          const v = vouchers.find(x=>x.id===action.id);
+          if (!v) break;
+          await db.applyEntries(accounts, v.entries||[], -1);
+          await db.deleteVoucher(action.id);
+          break;
+        }
+        case "EDIT_VOUCHER": {
+          const old = vouchers.find(x=>x.id===action.id);
+          if (!old) break;
+          await db.applyEntries(accounts, old.entries||[], -1);
+          await db.applyEntries(accounts, action.data.entries||[], 1);
+          await db.patchVoucher(action.id, {
+            voucherType: action.data.voucherType,
+            date: action.data.date,
+            narration: action.data.narration||"",
+            reference: action.data.reference||"",
+            entries: action.data.entries||[],
+            items: action.data.items||[],
+            edited_at: new Date().toISOString(),
+          });
+          break;
+        }
+
+        // ── GRNs ───────────────────────────────────────────────
+        case "ADD_GRN": {
+          const nextNo = await db.getGRNSeq();
+          const id = `GRN-${String(nextNo).padStart(4,"0")}`;
+          await db.incGRNSeq(nextNo);
+          const d = action.data;
+          await db.addGRN({
+            id,
+            date:d.date, partyId:d.partyId, truckNo:d.truckNo,
+            coffeeType:d.coffeeType, cropSeason:d.cropSeason,
+            totalBags:parseFloat(d.totalBags||0),
+            noOfBags:parseFloat(d.totalBags||0),
+            noOfUnits:parseFloat(d.noOfUnits||0),
+            noOfPaka:parseFloat(d.noOfPaka||0),
+            totalPaka:parseFloat(d.totalPaka||0),
+            bagType:d.bagType, inputMode:d.inputMode||"kg",
+            location:d.location,
+            firstWeight:parseFloat(d.firstWeight||0),
+            secondWeight:parseFloat(d.secondWeight||0),
+            grossWeight:parseFloat(d.grossWeight||0),
+            rejectedBags:parseFloat(d.rejectedBags||0),
+            netWeight:parseFloat(d.netWeight||0),
+            warehouse:d.warehouse, warehouseZone:d.warehouseZone||"",
+            stockNo:d.stockNo||"", remarks:d.remarks||"", narration:d.narration||"",
+            grnType:d.grnType||"purchase",
+            purchaseQtyKg:parseFloat(d.purchaseQtyKg||0),
+            storageQtyKg:parseFloat(d.storageQtyKg||0),
+            rateType:d.rateType||"per_kg",
+            rate:parseFloat(d.rate||0),
+            ratePending:d.ratePending||false,
+            purchaseValue:parseFloat(d.purchaseValue||0),
+            hasDrying:d.hasDrying||false,
+            dryingMethod:d.dryingMethod||"Yard",
+            dryKg:parseFloat(d.dryKg||0),
+            outputType:d.outputType||"",
+            priceBasis:d.priceBasis||"wet",
+            dryingRate:parseFloat(d.dryingRate||0),
+            dryingCharge:parseFloat(d.dryingCharge||0),
+          });
+
+          // Auto-post purchase voucher if rate known
+          if (!d.ratePending && parseFloat(d.purchaseValue||0)>0 && d.partyId && (d.grnType==="purchase"||d.grnType==="both")) {
+            const vSeq = await db.getSeq("PuV");
+            const vId = `PuV-${String(vSeq).padStart(4,"0")}`;
+            await db.incSeq("PuV", vSeq);
+            const entries = [
+              {accountId:"purchases", dr:d.purchaseValue, cr:0, narration:`Purchase - ${id}`},
+              {accountId:d.partyId,   dr:0, cr:d.purchaseValue, narration:`Purchase - ${id}`},
+            ];
+            await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${id}`,reference:id,entries,items:[{itemName:d.coffeeType,qty:d.netWeight,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
+            await db.applyEntries(accounts,entries,1);
+          }
+
+          // Drying charge handling - always on dry kg
+          if (d.hasDrying && parseFloat(d.dryingCharge||0)>0) {
+            const vSeq = await db.getSeq("JV");
+            const vId = `JV-${String(vSeq).padStart(4,"0")}`;
+            await db.incSeq("JV", vSeq);
+            let entries;
+            if (d.priceBasis==="wet") {
+              // Company expense — Dr Drying Expense, Cr Drying Income
+              entries = [
+                {accountId:"drying",  dr:d.dryingCharge, cr:0, narration:`Drying expense (wet basis) - ${id}`},
+                {accountId:"drying",  dr:0, cr:d.dryingCharge, narration:`Drying income - ${id}`},
+              ];
+            } else {
+              // Bill to party — Dr Party, Cr Drying Income
+              entries = [
+                {accountId:d.partyId, dr:d.dryingCharge, cr:0, narration:`Drying charge billed - ${id}`},
+                {accountId:"drying",  dr:0, cr:d.dryingCharge, narration:`Drying income - ${id}`},
+              ];
+            }
+            await db.addVoucher({id:vId,voucherType:"JV",date:d.date,narration:`Drying charges GRN ${id} (${d.dryKg}kg × ₹${d.dryingRate})`,reference:id,entries,items:[]});
+            await db.applyEntries(accounts,entries,1);
+          }
+          break;
+        }
+
+        case "EDIT_GRN": {
+          const old = grns.find(x=>x.id===action.id);
+          const d = action.data;
+          const wasRatePending = old?.ratePending;
+          const nowRateSet = !d.ratePending && d.rate && parseFloat(d.rate)>0;
+          await db.editGRN(action.id, {
+            date:d.date, partyId:d.partyId, truckNo:d.truckNo,
+            coffeeType:d.coffeeType, cropSeason:d.cropSeason,
+            totalBags:parseFloat(d.totalBags||0),
+            noOfBags:parseFloat(d.totalBags||0),
+            noOfUnits:parseFloat(d.noOfUnits||0),
+            noOfPaka:parseFloat(d.noOfPaka||0),
+            totalPaka:parseFloat(d.totalPaka||0),
+            bagType:d.bagType, inputMode:d.inputMode||"kg",
+            location:d.location,
+            firstWeight:parseFloat(d.firstWeight||0),
+            secondWeight:parseFloat(d.secondWeight||0),
+            grossWeight:parseFloat(d.grossWeight||0),
+            rejectedBags:parseFloat(d.rejectedBags||0),
+            netWeight:parseFloat(d.netWeight||0),
+            warehouse:d.warehouse, warehouseZone:d.warehouseZone||"",
+            stockNo:d.stockNo||"", remarks:d.remarks||"", narration:d.narration||"",
+            grnType:d.grnType||"purchase",
+            purchaseQtyKg:parseFloat(d.purchaseQtyKg||0),
+            storageQtyKg:parseFloat(d.storageQtyKg||0),
+            rateType:d.rateType||"per_kg", rate:parseFloat(d.rate||0),
+            ratePending:d.ratePending||false,
+            purchaseValue:parseFloat(d.purchaseValue||0),
+            hasDrying:d.hasDrying||false,
+            dryingMethod:d.dryingMethod||"Yard",
+            dryKg:parseFloat(d.dryKg||0),
+            outputType:d.outputType||"",
+            priceBasis:d.priceBasis||"wet",
+            dryingRate:parseFloat(d.dryingRate||0),
+            dryingCharge:parseFloat(d.dryingCharge||0),
+          });
+          // Post purchase voucher when rate confirmed from pending
+          if (wasRatePending && nowRateSet && d.partyId && parseFloat(d.purchaseValue||0)>0) {
+            const vSeq = await db.getSeq("PuV");
+            const vId = `PuV-${String(vSeq).padStart(4,"0")}`;
+            await db.incSeq("PuV", vSeq);
+            // Use dry kg as billing qty if drying enabled
+            const billingQty = d.hasDrying && parseFloat(d.dryKg||0)>0 ? d.dryKg : d.netWeight;
+            const entries = [
+              {accountId:"purchases", dr:d.purchaseValue, cr:0, narration:`Purchase - ${action.id}`},
+              {accountId:d.partyId,   dr:0, cr:d.purchaseValue, narration:`Purchase - ${action.id}`},
+            ];
+            await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${action.id}`,reference:action.id,entries,items:[{itemName:d.coffeeType,qty:billingQty,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
+            await db.applyEntries(accounts,entries,1);
+          }
+
+          // Post drying voucher if dryKg is set, drying charge > 0, and no drying voucher exists yet
+          const newDryKg = parseFloat(d.dryKg||0);
+          const dryingChargeAmt = parseFloat(d.dryingCharge||0);
+          const dryingVoucherExists = vouchers.some(v => v.reference===action.id && v.voucherType==="JV");
+          if (newDryKg>0 && d.hasDrying && dryingChargeAmt>0 && d.partyId && !dryingVoucherExists) {
+            const vSeq = await db.getSeq("JV");
+            const vId = `JV-${String(vSeq).padStart(4,"0")}`;
+            await db.incSeq("JV", vSeq);
+            let entries;
+            if (d.priceBasis==="wet") {
+              entries = [
+                {accountId:"drying", dr:dryingChargeAmt, cr:0, narration:`Drying expense (wet basis) - ${action.id}`},
+                {accountId:"drying", dr:0, cr:dryingChargeAmt, narration:`Drying income - ${action.id}`},
+              ];
+            } else {
+              entries = [
+                {accountId:d.partyId, dr:dryingChargeAmt, cr:0, narration:`Drying charge - ${action.id}`},
+                {accountId:"drying",  dr:0, cr:dryingChargeAmt, narration:`Drying income - ${action.id}`},
+              ];
+            }
+            await db.addVoucher({id:vId,voucherType:"JV",date:d.date,narration:`Drying charges GRN ${action.id} (${newDryKg}kg × ₹${d.dryingRate})`,reference:action.id,entries,items:[]});
+            await db.applyEntries(accounts,entries,1);
+          }
+          break;
+        }
+        case "ADD_QUALITY_REPORT":
+          await db.addQuality(action.grnId, action.report); break;
+        case "DELETE_GRN":
+          await db.deleteGRN(action.id); break;
+
+        default: break;
+      }
+      // Refresh all data after every action
+      await loadAll();
+    } catch(e) {
+      setError("Error: " + e.message);
+    }
+    setSaving(false);
+  }, [accounts, vouchers, loadAll]);
+
+  // ── LOGIN ─────────────────────────────────────────────────────
+  if (!currentUser) {
+    return (
+      <div style={{minHeight:"100vh",background:`linear-gradient(135deg,${C.accent} 0%,#3d2010 100%)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Lora',Georgia,serif"}}>
+        <LoginForm onLogin={async (u,p)=>{
+          setLoading(true);
+          setError("");
+          try {
+            const user = await db.login(u,p);
+            if (!user) { setError("Invalid username or password"); setLoading(false); return; }
+            setCurrentUser(user);
+          } catch(e) {
+            setError("Connection error: " + e.message);
+            setLoading(false);
+          }
+        }} loading={loading} error={error}/>
+      </div>
+    );
+  }
+
+  // ── LOADING SCREEN ────────────────────────────────────────────
+  if (loading) return (
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"'Lora',Georgia,serif"}}>
+      <div style={{fontSize:48}}>☕</div>
+      <div style={{fontWeight:700,color:C.accent,fontSize:18}}>Loading Coffee Vel...</div>
+      <div style={{color:C.muted,fontSize:13}}>Connecting to database</div>
+    </div>
+  );
+
+  const role = currentUser.role;
+  const visibleNav = NAV.filter(n=>!n.adminOnly||role==="admin");
+
+  return(
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",fontFamily:"'Lora',Georgia,serif"}}>
+      <div style={{width:215,background:C.accent,display:"flex",flexDirection:"column",flexShrink:0,position:"sticky",top:0,height:"100vh"}}>
+        <div style={{padding:"20px 20px 16px",borderBottom:"1px solid #ffffff22"}}>
+          <div style={{fontSize:17,fontWeight:800,color:"#fff"}}>☕ Coffee Vel</div>
+          <div style={{fontSize:10,color:"#ffffff88",marginTop:2,letterSpacing:1,textTransform:"uppercase"}}>International · Accounts</div>
+        </div>
+        <nav style={{flex:1,padding:"10px 8px",overflowY:"auto"}}>
+          {visibleNav.map(n=>(
+            <button key={n.id} onClick={()=>setTab(n.id)} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"9px 14px",borderRadius:8,border:"none",cursor:"pointer",background:tab===n.id?"#ffffff22":"transparent",color:tab===n.id?"#fff":"#ffffff88",fontWeight:tab===n.id?700:500,fontSize:13,fontFamily:"inherit",marginBottom:2,textAlign:"left"}}>
+              <span style={{width:20}}>{n.icon}</span>{n.label}
+            </button>
+          ))}
+        </nav>
+        <div style={{padding:"10px 16px",borderTop:"1px solid #ffffff22"}}>
+          {saving&&<div style={{color:"#fcd34d",fontSize:11,marginBottom:6,textAlign:"center"}}>⏳ Saving...</div>}
+          <div style={{color:"#ffffffcc",fontSize:12,fontWeight:600}}>{currentUser.name}</div>
+          <div style={{color:"#ffffff66",fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>{ROLES[role]?.label}</div>
+          <button onClick={()=>setCurrentUser(null)} style={{marginTop:8,background:"#ffffff22",border:"none",color:"#fff",padding:"5px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",width:"100%"}}>Sign Out</button>
+        </div>
+      </div>
+
+      <div style={{flex:1,padding:"28px 32px",overflowY:"auto"}}>
+        {error&&(
+          <div style={{marginBottom:16,padding:"10px 16px",background:"#fee2e2",border:"1px solid #fca5a5",borderRadius:8,color:C.red,fontSize:13,fontWeight:600,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            {error}
+            <button onClick={()=>setError("")} style={{background:"none",border:"none",cursor:"pointer",color:C.red,fontSize:18}}>×</button>
+          </div>
+        )}
+        {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch}/>}
+        {tab==="grn"       && <GRNModule      state={state} dispatch={dispatch} role={role}/>}
+        {tab==="hulling"   && <HullingModule  state={state} dispatch={dispatch} role={role}/>}
+        {tab==="sales"     && <SalesModule    state={state} dispatch={dispatch} role={role}/>}
+        {tab==="storage"   && <StorageModule  state={state} dispatch={dispatch} role={role}/>}
+        {tab==="daybook"   && <Daybook        state={state} dispatch={dispatch} role={role}/>}
+        {tab==="ledger"    && <LedgerView     state={state}/>}
+        {tab==="pl"        && <ProfitLoss     state={state}/>}
+        {tab==="trial"     && <TrialBalance   state={state}/>}
+        {tab==="stock"     && <StockView      state={state} dispatch={dispatch}/>}
+        {tab==="parties"   && <Parties        state={state} dispatch={dispatch}/>}
+        {tab==="accounts"  && <AccountsMaster state={state} dispatch={dispatch}/>}
+        {tab==="masters"   && role==="admin" && <MastersModule state={state} dispatch={dispatch}/>}
+        {tab==="users"     && role==="admin" && <UserManagement state={state} dispatch={dispatch} currentUser={currentUser}/>}
+      </div>
+    </div>
+  );
+}
+
