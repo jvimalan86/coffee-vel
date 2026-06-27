@@ -4298,6 +4298,23 @@ function StockTransferModule({ state, dispatch, role, currentUser }) {
 }
 
 // ── YERCAUD PAYMENTS MODULE ───────────────────────────────────────
+// ── YERCAUD ERROR BOUNDARY ───────────────────────────────────────
+class YercaudErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  componentDidCatch(e) { console.error("YercaudModule crash:", e); }
+  render() {
+    if (this.state.error) return (
+      <div style={{padding:24,background:"#fee2e2",borderRadius:10,color:"#b91c1c",fontFamily:"monospace",fontSize:13}}>
+        <div style={{fontWeight:800,marginBottom:8}}>⚠️ Yercaud module error — check browser console (F12)</div>
+        <div>{this.state.error?.message||String(this.state.error)}</div>
+        <button onClick={()=>this.setState({error:null})} style={{marginTop:12,padding:"6px 16px",background:"#b91c1c",color:"#fff",border:"none",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>Retry</button>
+      </div>
+    );
+    return this.props.children;
+  }
+}
+
 const YERCAUD_CASH_ID = "yercaud_cash";
 
 function YercaudModule({ state, dispatch, role }) {
@@ -4329,6 +4346,7 @@ function YercaudModule({ state, dispatch, role }) {
   const canPost   = ROLES[role]?.canPost;
   const canDelete = ROLES[role]?.canDelete;
   const isBranch  = role === "branch";
+  const suppliers = Object.values(state.parties).filter(p=>p.partyType==="supplier");
   const yercaudCash = state.accounts[YERCAUD_CASH_ID];
   const yercaudBal  = yercaudCash?.balance || 0;
 
@@ -4345,20 +4363,24 @@ function YercaudModule({ state, dispatch, role }) {
   const payments = (state.yercaudPayments||[]);
 
   // Yercaud expenses = PV vouchers from yercaud_cash that are NOT supplier payments
-  const yercaudExpenses = useMemo(()=>
-    state.vouchers.filter(v=>
-      v.voucherType==="PV" &&
-      v.entries?.some(e=>e.accountId===YERCAUD_CASH_ID && parseFloat(e.cr||0)>0) &&
-      !v.entries?.some(e=>Object.values(state.parties).some(p=>p.id===e.accountId))
-    ).map(v=>({
-      id: v.id,
-      date: v.date,
-      narration: v.narration||"",
-      amount: v.entries.filter(e=>e.accountId===YERCAUD_CASH_ID).reduce((s,e)=>s+parseFloat(e.cr||0),0),
-      expenseAccountId: v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId||"",
-      expenseAccountName: state.accounts[v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId]?.name||"—",
-    }))
-  ,[state.vouchers, state.accounts, state.parties]);
+  const partyIdSet = useMemo(()=>new Set(Object.values(state.parties).map(p=>p.id)),[state.parties]);
+
+  const yercaudExpenses = useMemo(()=>{
+    try {
+      return state.vouchers.filter(v=>
+        v.voucherType==="PV" &&
+        v.entries?.some(e=>e.accountId===YERCAUD_CASH_ID && parseFloat(e.cr||0)>0) &&
+        !v.entries?.some(e=>partyIdSet.has(e.accountId))
+      ).map(v=>({
+        id: v.id,
+        date: v.date,
+        narration: v.narration||"",
+        amount: v.entries.filter(e=>e.accountId===YERCAUD_CASH_ID).reduce((s,e)=>s+parseFloat(e.cr||0),0),
+        expenseAccountId: v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId||"",
+        expenseAccountName: state.accounts[v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId]?.name||"—",
+      }));
+    } catch(e) { console.error("yercaudExpenses error:", e); return []; }
+  },[state.vouchers, state.accounts, partyIdSet]);
 
   // Filtered payments
   const filtered = payments.filter(p => {
@@ -5945,40 +5967,12 @@ export default function App() {
       setHullingJobs(hullList||[]);
       setSales(salesList||[]);
       setTransfers(transferList||[]);
-      setYercaudPayments((yercaudList||[]).map(p=>({
-        ...p,
-        partyId:     p.party_id     || p.partyId     || "",
-        paymentMode: p.payment_mode || p.paymentMode || "cash",
-      })));
-      setLoadmanCharges((ldCharges||[]).map(c=>({
-        ...c,
-        serviceType: c.service_type || c.serviceType || "",
-        weightKg:    c.weight_kg    || c.weightKg    || 0,
-        whoBearsIt:  c.who_bears_it || c.whoBearsIt  || "company",
-        partyId:     c.party_id     || c.partyId     || "",
-        linkedTo:    c.linked_to    || c.linkedTo    || "standalone",
-        linkedId:    c.linked_id    || c.linkedId    || "",
-      })));
+      setYercaudPayments(yercaudList||[]);
+      setLoadmanCharges(ldCharges||[]);
       setLoadmanRates(ldRates||[]);
       setLorryOwners(lorryOwnerList||[]);
-      setLorryRentals((lorryRentalList||[]).map(r=>({
-        ...r,
-        lorryOwnerId:  r.lorry_owner_id || r.lorryOwnerId  || "",
-        vehicleNo:     r.vehicle_no      || r.vehicleNo     || "",
-        fromLocation:  r.from_location   || r.fromLocation  || "",
-        toLocation:    r.to_location     || r.toLocation    || "",
-        weightKg:      r.weight_kg       || r.weightKg      || 0,
-        whoBearsIt:    r.who_bears_it    || r.whoBearsIt    || "company",
-        partyId:       r.party_id        || r.partyId       || "",
-        linkedTo:      r.linked_to       || r.linkedTo      || "standalone",
-        linkedId:      r.linked_id       || r.linkedId      || "",
-      })));
-      setLorryPayments((lorryPayList||[]).map(p=>({
-        ...p,
-        ownerId:        p.owner_id        || p.ownerId        || "",
-        paymentMode:    p.payment_mode    || p.paymentMode    || "cash",
-        paymentAccount: p.payment_account || p.paymentAccount || "cash",
-      })));
+      setLorryRentals(lorryRentalList||[]);
+      setLorryPayments(lorryPayList||[]);
     } catch(e) {
       setError("Failed to load data: " + e.message);
     }
@@ -6488,18 +6482,18 @@ export default function App() {
           await db.incLoadmanSeq(seq).catch(()=>{});
           await db.addLoadmanCharge({
             id,
-            date:         d.date,
-            service_type: d.serviceType,
-            unit:         d.unit,
-            bags:         parseFloat(d.bags||0),
-            weight_kg:    parseFloat(d.weightKg||0),
-            rate:         parseFloat(d.rate||0),
-            amount:       d.amount,
-            who_bears_it: d.whoBearsIt||"company",
-            party_id:     d.partyId||null,
-            linked_to:    d.linkedTo||"standalone",
-            linked_id:    d.linkedId||"",
-            narration:    d.narration||"",
+            date:        d.date,
+            serviceType: d.serviceType,
+            unit:        d.unit,
+            bags:        parseFloat(d.bags||0),
+            weightKg:    parseFloat(d.weightKg||0),
+            rate:        parseFloat(d.rate||0),
+            amount:      d.amount,
+            whoBearsIt:  d.whoBearsIt||"company",
+            partyId:     d.partyId||null,
+            linkedTo:    d.linkedTo||"standalone",
+            linkedId:    d.linkedId||"",
+            narration:   d.narration||"",
           });
           // Ensure accounts exist
           if (!accounts[LOADMAN_PAYABLE_ID]) {
@@ -6574,21 +6568,21 @@ export default function App() {
           await db.incLorrySeq(seq).catch(()=>{});
           await db.addLorryRental({
             id,
-            date:           d.date,
-            lorry_owner_id: d.lorryOwnerId,
-            vehicle_no:     d.vehicleNo,
-            from_location:  d.fromLocation||"",
-            to_location:    d.toLocation||"",
-            unit:           d.unit||"trip",
-            bags:           parseFloat(d.bags||0),
-            weight_kg:      parseFloat(d.weightKg||0),
-            rate:           parseFloat(d.rate||0),
-            amount:         d.amount,
-            who_bears_it:   d.whoBearsIt||"company",
-            party_id:       d.partyId||null,
-            linked_to:      d.linkedTo||"standalone",
-            linked_id:      d.linkedId||"",
-            narration:      d.narration||"",
+            date:         d.date,
+            lorryOwnerId: d.lorryOwnerId,
+            vehicleNo:    d.vehicleNo,
+            fromLocation: d.fromLocation||"",
+            toLocation:   d.toLocation||"",
+            unit:         d.unit||"trip",
+            bags:         parseFloat(d.bags||0),
+            weightKg:     parseFloat(d.weightKg||0),
+            rate:         parseFloat(d.rate||0),
+            amount:       d.amount,
+            whoBearsIt:   d.whoBearsIt||"company",
+            partyId:      d.partyId||null,
+            linkedTo:     d.linkedTo||"standalone",
+            linkedId:     d.linkedId||"",
+            narration:    d.narration||"",
           });
           // Ensure lorry expense account exists
           if (!accounts[LORRY_EXPENSE_ID]) {
@@ -6627,12 +6621,12 @@ export default function App() {
           await db.incLorryPaySeq(seq).catch(()=>{});
           await db.addLorryPayment({
             id,
-            date:            d.date,
-            owner_id:        d.ownerId,
-            amount:          d.amount,
-            payment_mode:    d.paymentMode||"cash",
-            payment_account: d.paymentAccount||"cash",
-            narration:       d.narration||"",
+            date:           d.date,
+            ownerId:        d.ownerId,
+            amount:         d.amount,
+            paymentMode:    d.paymentMode||"cash",
+            paymentAccount: d.paymentAccount||"cash",
+            narration:      d.narration||"",
           });
           const vSeq = await db.getSeq("PV");
           const vId = `PV-${String(vSeq).padStart(4,"0")}`;
@@ -6712,12 +6706,12 @@ export default function App() {
 
           await db.addYercaudPayment({
             id,
-            date:         d.date,
-            party_id:     d.partyId,
-            amount:       d.amount,
-            payment_mode: d.paymentMode||"cash",
-            reference:    d.reference||"",
-            narration:    d.narration||"",
+            date:        d.date,
+            partyId:     d.partyId,
+            amount:      d.amount,
+            paymentMode: d.paymentMode||"cash",
+            reference:   d.reference||"",
+            narration:   d.narration||"",
           });
 
           // Post PV voucher: Dr Supplier (reduces payable), Cr Yercaud Cash
@@ -6851,7 +6845,7 @@ export default function App() {
         )}
         {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch} setTab={setTab} role={role}/>}
         {tab==="grn"       && <GRNModule      state={{...state, grns: isBranch ? state.grns.filter(g=>g.location===userLoc||!g.location) : state.grns}} dispatch={dispatch} role={role} currentUser={currentUser}/>}
-        {tab==="yercaud"   && <YercaudModule  state={state} dispatch={dispatch} role={role}/>}
+        {tab==="yercaud"   && <YercaudErrorBoundary><YercaudModule  state={state} dispatch={dispatch} role={role}/></YercaudErrorBoundary>}
         {tab==="loadman"   && <LoadmanModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="lorry"     && <LorryModule    state={state} dispatch={dispatch} role={role}/>}
         {tab==="opening"   && <OpeningBalanceModule state={state} dispatch={dispatch}/>}
