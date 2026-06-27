@@ -5423,7 +5423,9 @@ const NAV=[
 
 export default function App() {
   const [tab, setTab]               = useState("dashboard");
-  const [currentUser, setCurrentUser] = useState(null);
+  const [currentUser, setCurrentUser] = useState(()=>{
+    try { const u=localStorage.getItem("cv_user"); return u?JSON.parse(u):null; } catch{ return null; }
+  });
   const [loading, setLoading]       = useState(false);
   const [saving, setSaving]         = useState(false);
   const [error, setError]           = useState("");
@@ -6325,6 +6327,7 @@ export default function App() {
             const user = await db.login(u,p);
             if (!user) { setError("Invalid username or password"); setLoading(false); return; }
             setCurrentUser(user);
+            try { localStorage.setItem("cv_user", JSON.stringify(user)); } catch{}
           } catch(e) {
             setError("Connection error: " + e.message);
             setLoading(false);
@@ -6399,7 +6402,7 @@ export default function App() {
           {saving&&<div style={{color:"#fcd34d",fontSize:11,marginBottom:6,textAlign:"center"}}>⏳ Saving...</div>}
           <div style={{color:"#ffffffcc",fontSize:12,fontWeight:600}}>{currentUser.name}</div>
           <div style={{color:"#ffffff66",fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>{ROLES[role]?.label}</div>
-          <button onClick={()=>setCurrentUser(null)} style={{marginTop:8,background:"#ffffff22",border:"none",color:"#fff",padding:"5px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",width:"100%"}}>Sign Out</button>
+          <button onClick={()=>{setCurrentUser(null);try{localStorage.removeItem("cv_user");}catch{}}} style={{marginTop:8,background:"#ffffff22",border:"none",color:"#fff",padding:"5px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",width:"100%"}}>Sign Out</button>
         </div>
       </div>
       {/* Main content */}
