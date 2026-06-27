@@ -1041,8 +1041,8 @@ function StockView({ state, dispatch }) {
             <thead><tr style={{background:"#f5ede4"}}>
               <th style={sh.th}>Item / Grade</th>
               <th style={{...sh.th,textAlign:"right"}}>On Hand</th>
-              <th style={{...sh.th,textAlign:"right"}}>In (GRN+Purchase)</th>
-              <th style={{...sh.th,textAlign:"right"}}>Out (Sales)</th>
+              <th style={{...sh.th,textAlign:"right"}}>In (GRN)</th>
+              <th style={{...sh.th,textAlign:"right"}}>Out (Sales+Transfer)</th>
             </tr></thead>
             <tbody>
               {itemsWithStock.length===0?(
@@ -1051,34 +1051,42 @@ function StockView({ state, dispatch }) {
                 const qty = stockBalances[item] || 0;
                 const DRYING_OUT = {"Wet Parchment":"Parchment","Raw Cherry":"Dry Cherry","wet parchment":"Parchment","raw cherry":"Dry Cherry"};
                 const hulledGrnIds = new Set((state.hullingJobs||[]).map(h=>h.grnId).filter(Boolean));
+                const grnIds = new Set((state.grns||[]).map(g=>g.id));
+                const acceptedTransferGrnIds = new Set((state.transfers||[]).filter(t=>t.status==="accepted").map(t=>t.grnId).filter(Boolean));
+
                 const grnIn = (state.grns||[]).reduce((s,g)=>{
                   const dryKg  = parseFloat(g.dryKg||0);
                   const hasDry = g.hasDrying===true||g.hasDrying==="true"||g.hasDrying===1;
                   const ct     = (g.coffeeType||"").trim();
+                  const isYercaud = (g.location||"").toLowerCase()==="yercaud";
+                  // Yercaud GRNs only count after accepted transfer
+                  if (isYercaud && !acceptedTransferGrnIds.has(g.id)) return s;
                   if (hasDry && dryKg>0) {
-                    const outputType = g.outputType?.trim()||DRYING_OUT[ct]||ct;
-                    // If this GRN has been hulled, don't count parchment in stock
                     if (hulledGrnIds.has(g.id)) return s;
+                    const outputType = g.outputType?.trim()||DRYING_OUT[ct]||ct;
                     if (outputType===item) return s+dryKg;
                     return s;
                   } else {
-                    // If this GRN has been hulled, don't count in stock
                     if (hulledGrnIds.has(g.id)) return s;
                     if (ct===item) return s+parseFloat(g.netWeight||0);
                     return s;
                   }
                 },0);
-                const purIn = state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="PuV").flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
+                // Only count PuV items NOT linked to a GRN (standalone purchases)
+                const purIn = state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="PuV" && !(v.reference && grnIds.has(v.reference))).flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
                 const sold = state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="SV").flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
+                // Transferred out = accepted transfers for GRNs matching this item
+                const transferredOut = (state.transfers||[]).filter(t=>t.status==="accepted" && (t.coffeeType===item||DRYING_OUT[t.coffeeType]===item)).reduce((s,t)=>s+parseFloat(t.weightKg||0),0);
                 const totalIn = grnIn + purIn;
+                const totalOut = sold + transferredOut;
                 // Only show rows with actual movements
-                if (totalIn===0 && sold===0 && qty===0) return null;
+                if (totalIn===0 && totalOut===0 && qty===0) return null;
                 return(
                   <tr key={item}>
                     <td style={{...sh.td,fontWeight:700}}>{item}</td>
                     <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:qty>0?C.green:qty<0?C.red:C.muted}}>{fmtQ(qty)} kg</td>
                     <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.blue}}>{fmtQ(totalIn)} kg</td>
-                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red}}>{fmtQ(sold)} kg</td>
+                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red}}>{fmtQ(totalOut)} kg{transferredOut>0&&<span style={{fontSize:10,color:C.muted,marginLeft:4}}>(incl. {fmtQ(transferredOut)}kg transferred)</span>}</td>
                   </tr>
                 );
               }).filter(Boolean)}
