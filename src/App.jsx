@@ -2113,6 +2113,7 @@ function GRNForm({ state, dispatch, onDone, initial, editId, role, currentUser }
     // purchase rate
     rateType:"per_kg",             // "per_kg" | "per_paka"
     rate:"", ratePending:false,
+    paymentType:"credit",          // "credit"=party account | "cash"=pay cash now
     // split: purchase + storage portions
     purchaseQtyKg:"", storageQtyKg:"",
   };
@@ -2127,6 +2128,7 @@ function GRNForm({ state, dispatch, onDone, initial, editId, role, currentUser }
       hasDrying:    initial.hasDrying    || false,
       priceBasis:   initial.priceBasis   || "wet",
       grnType:      initial.grnType      || "purchase",
+      paymentType:  initial.paymentType  || "credit",
     };
   });
   const [err, setErr] = useState("");
@@ -2358,6 +2360,12 @@ function GRNForm({ state, dispatch, onDone, initial, editId, role, currentUser }
               💰 Purchase Rate {form.hasDrying&&<span style={{color:"#c2410c",fontWeight:400}}>(applied on dry kg after drying)</span>}
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(175px,1fr))",gap:12}}>
+              <Field label="Payment Type">
+                <select value={form.paymentType||"credit"} onChange={e=>set("paymentType",e.target.value)} style={sh.input} disabled={form.ratePending}>
+                  <option value="credit">Credit — Party Account</option>
+                  <option value="cash">Cash Purchase — Pay Now</option>
+                </select>
+              </Field>
               <Field label="Rate Type">
                 <select value={form.rateType} onChange={e=>set("rateType",e.target.value)} style={sh.input} disabled={form.ratePending}>
                   <option value="per_kg">Per KG (₹/kg)</option>
@@ -2374,16 +2382,18 @@ function GRNForm({ state, dispatch, onDone, initial, editId, role, currentUser }
               <span style={{fontSize:13,color:C.muted,fontWeight:600}}>Rate Pending — fix & bill later</span>
             </label>
             {!form.ratePending&&rate>0&&!form.hasDrying&&pricingQty>0&&(
-              <div style={{padding:"12px 16px",background:"#f0fdf4",borderRadius:8,display:"flex",gap:24,alignItems:"center",flexWrap:"wrap",marginTop:10}}>
+              <div style={{padding:"12px 16px",background:form.paymentType==="cash"?"#eff6ff":"#f0fdf4",borderRadius:8,display:"flex",gap:24,alignItems:"center",flexWrap:"wrap",marginTop:10}}>
                 <div>
                   <div style={{fontSize:11,color:C.muted}}>Purchase Value</div>
-                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:C.green}}>{fmt(purchaseValue)}</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:form.paymentType==="cash"?C.blue:C.green}}>{fmt(purchaseValue)}</div>
                 </div>
                 <div style={{fontSize:12,color:C.muted}}>
                   {form.rateType==="per_paka"?`${totalPaka} paka × ₹${rate}`:`${pricingQty.toFixed(2)} kg × ₹${rate}`}
                 </div>
-                <div style={{fontSize:11,background:"#dcfce7",color:C.green,padding:"4px 10px",borderRadius:8,fontWeight:600}}>
-                  → Auto-posts Purchase voucher to party account
+                <div style={{fontSize:11,background:form.paymentType==="cash"?"#dbeafe":"#dcfce7",color:form.paymentType==="cash"?C.blue:C.green,padding:"4px 10px",borderRadius:8,fontWeight:600}}>
+                  {form.paymentType==="cash"
+                    ? "→ Dr Purchases, Cr Cash — no payable created"
+                    : "→ Dr Purchases, Cr Party Account — payable created"}
                 </div>
               </div>
             )}
@@ -3002,6 +3012,7 @@ function GRNModule({ state, dispatch, role, currentUser }) {
               {hasDry&&!g.dryKg&&<span style={{fontSize:11,background:"#fff7ed",color:"#c2410c",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⏳ Drying Pending</span>}
               {hasDry&&g.dryKg>0&&<span style={{fontSize:11,background:"#fff7ed",color:"#c2410c",padding:"2px 8px",borderRadius:10,fontWeight:700}}>🌡 {g.dryKg} kg dry</span>}
               {g.ratePending&&<span style={{fontSize:11,background:"#fef9c3",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⚠ Rate Pending</span>}
+              {g.paymentType==="cash"&&!g.ratePending&&<span style={{fontSize:11,background:"#eff6ff",color:C.blue,padding:"2px 8px",borderRadius:10,fontWeight:700}}>💵 Cash</span>}
               {showQCBtn&&!hasQR&&<span style={{fontSize:11,background:"#fef9c3",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⚠ QC Pending</span>}
               {showQCBtn&&hasQR&&<span style={{fontSize:11,background:"#dcfce7",color:C.green,padding:"2px 8px",borderRadius:10,fontWeight:700}}>✓ QC Done</span>}
               <span style={{color:C.muted}}>{expanded?"▲":"▼"}</span>
@@ -6325,6 +6336,7 @@ export default function App() {
             priceBasis:d.priceBasis||"wet",
             dryingRate:parseFloat(d.dryingRate||0),
             dryingCharge:parseFloat(d.dryingCharge||0),
+            paymentType:d.paymentType||"credit",
           });
 
           // Auto-post purchase voucher if rate known
@@ -6332,11 +6344,13 @@ export default function App() {
             const vSeq = await db.getSeq("PuV");
             const vId = `PuV-${String(vSeq).padStart(4,"0")}`;
             await db.incSeq("PuV", vSeq);
+            // Cash purchase: Cr Cash instead of Cr Party
+            const creditAccountId = d.paymentType==="cash" ? "cash" : d.partyId;
             const entries = [
-              {accountId:"purchases", dr:d.purchaseValue, cr:0, narration:`Purchase - ${id}`},
-              {accountId:d.partyId,   dr:0, cr:d.purchaseValue, narration:`Purchase - ${id}`},
+              {accountId:"purchases",     dr:d.purchaseValue, cr:0,              narration:`Purchase - ${id}`},
+              {accountId:creditAccountId, dr:0,               cr:d.purchaseValue, narration:`Purchase - ${id}`},
             ];
-            await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${id}`,reference:id,entries,items:[{itemName:d.coffeeType,qty:d.netWeight,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
+            await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${id}${d.paymentType==="cash"?" (Cash)":""}`,reference:id,entries,items:[{itemName:d.coffeeType,qty:d.netWeight,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
           }
 
           // Drying charge handling - always on dry kg
@@ -6398,19 +6412,19 @@ export default function App() {
             priceBasis:d.priceBasis||"wet",
             dryingRate:parseFloat(d.dryingRate||0),
             dryingCharge:parseFloat(d.dryingCharge||0),
+            paymentType:d.paymentType||"credit",
           });
-          // Post purchase voucher when rate confirmed from pending
           if (wasRatePending && nowRateSet && d.partyId && parseFloat(d.purchaseValue||0)>0) {
             const vSeq = await db.getSeq("PuV");
             const vId = `PuV-${String(vSeq).padStart(4,"0")}`;
             await db.incSeq("PuV", vSeq);
-            // Use dry kg as billing qty if drying enabled
             const billingQty = d.hasDrying && parseFloat(d.dryKg||0)>0 ? d.dryKg : d.netWeight;
+            const creditAccountId = d.paymentType==="cash" ? "cash" : d.partyId;
             const entries = [
-              {accountId:"purchases", dr:d.purchaseValue, cr:0, narration:`Purchase - ${action.id}`},
-              {accountId:d.partyId,   dr:0, cr:d.purchaseValue, narration:`Purchase - ${action.id}`},
+              {accountId:"purchases",     dr:d.purchaseValue, cr:0,               narration:`Purchase - ${action.id}`},
+              {accountId:creditAccountId, dr:0,               cr:d.purchaseValue, narration:`Purchase - ${action.id}`},
             ];
-            await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${action.id}`,reference:action.id,entries,items:[{itemName:d.coffeeType,qty:billingQty,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
+            await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${action.id}${d.paymentType==="cash"?" (Cash)":""}`,reference:action.id,entries,items:[{itemName:d.coffeeType,qty:billingQty,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
           }
 
           // Post drying voucher if dryKg is set, drying charge > 0, and no drying voucher exists yet
