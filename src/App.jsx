@@ -1653,41 +1653,53 @@ const statusBadge = (outstanding, purchased) => {
   return                                                 { label:"Unpaid",  color:"#b91c1c", bg:"#fee2e2" };
 };
 
-function Dashboard({ state, setTab }) {
-  const cash=state.accounts["cash"]?.balance||0;
-  const bankAccounts=Object.values(state.accounts).filter(a=>a.group==="Cash & Bank"&&a.id!=="cash");
-  const totalBank=bankAccounts.reduce((s,a)=>s+a.balance,0);
-  const parties=Object.values(state.parties);
-  const todayVouchers=state.vouchers.filter(v=>v.date===today());
-  const stockItems=Object.entries(state.stock||{}).filter(([,q])=>q>0);
-  const incomeAccs=Object.values(state.accounts).filter(a=>a.type==="income");
-  const expenseAccs=Object.values(state.accounts).filter(a=>a.type==="expense");
-  const totalIncome=incomeAccs.reduce((s,a)=>s+a.balance,0);
-  const totalExpense=expenseAccs.reduce((s,a)=>s+a.balance,0);
-  const netProfit=totalIncome-totalExpense;
+function Dashboard({ state, setTab, role }) {
+  const isBranch = role === "branch";
+  const [activeView, setActiveView] = useState(isBranch ? "yercaud" : "hq");
 
-  // Pending alerts
+  // ── HQ DATA ──────────────────────────────────────────────────────
+  const cash        = state.accounts["cash"]?.balance||0;
+  const bankAccounts= Object.values(state.accounts).filter(a=>a.group==="Cash & Bank"&&a.id!=="cash"&&a.id!==YERCAUD_CASH_ID);
+  const totalBank   = bankAccounts.reduce((s,a)=>s+a.balance,0);
+  const todayStr    = today();
+  const todayVouchers = state.vouchers.filter(v=>v.date===todayStr);
+  const incomeAccs  = Object.values(state.accounts).filter(a=>a.type==="income");
+  const expenseAccs = Object.values(state.accounts).filter(a=>a.type==="expense");
+  const totalIncome = incomeAccs.reduce((s,a)=>s+a.balance,0);
+  const totalExpense= expenseAccs.reduce((s,a)=>s+a.balance,0);
+  const netProfit   = totalIncome-totalExpense;
+  const thisMonth   = new Date().toISOString().slice(0,7);
+  const grnsThisMonth  = state.grns.filter(g=>(g.date||"").startsWith(thisMonth)).length;
+  const salesThisMonth = (state.sales||[]).filter(s=>(s.date||"").startsWith(thisMonth)).length;
+
+  // HQ stock only (exclude Yercaud GRNs — location Yercaud)
+  const hqStockItems = Object.entries(state.stock||{}).filter(([,q])=>q>0);
+
+  // HQ-only payables (suppliers whose GRNs came to HQ)
+  const totalPayable    = Object.values(state.parties).filter(p=>p.partyType==="supplier").reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
+  const totalReceivable = Object.values(state.parties).filter(p=>p.partyType==="customer").reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
+
+  // Pending alerts (HQ-relevant)
   const ratePending   = state.grns.filter(g=>g.ratePending&&(g.grnType==="purchase"||g.grnType==="both")).length;
   const dryingPending = state.grns.filter(g=>(g.hasDrying===true||g.hasDrying==="true")&&!g.dryKg).length;
   const qcPending     = state.grns.filter(g=>needsQualityForGRN(g)&&!g.qualityReport).length;
 
-  // Supplier payables
+  // Top payables/receivables
   const topPayables = useMemo(()=>
     Object.values(state.parties).filter(p=>p.partyType==="supplier").map(p=>{
       const bal=state.accounts[p.id]?.balance||0;
-      const outstanding = bal>0?bal:0;
-      const oldestGRN = state.grns.filter(g=>g.partyId===p.id&&!g.ratePending&&parseFloat(g.purchaseValue||0)>0).sort((a,b)=>a.date.localeCompare(b.date))[0];
-      return {...p, outstanding, days:oldestGRN?daysDiff(oldestGRN.date):0};
+      const outstanding=bal>0?bal:0;
+      const oldestGRN=state.grns.filter(g=>g.partyId===p.id&&!g.ratePending&&parseFloat(g.purchaseValue||0)>0).sort((a,b)=>a.date.localeCompare(b.date))[0];
+      return {...p,outstanding,days:oldestGRN?daysDiff(oldestGRN.date):0};
     }).filter(p=>p.outstanding>0).sort((a,b)=>b.outstanding-a.outstanding).slice(0,5)
   ,[state.parties,state.accounts,state.grns]);
 
-  // Buyer receivables
   const topReceivables = useMemo(()=>
     Object.values(state.parties).filter(p=>p.partyType==="customer").map(p=>{
       const bal=state.accounts[p.id]?.balance||0;
-      const outstanding = bal>0?bal:0;
+      const outstanding=bal>0?bal:0;
       const oldestSale=(state.sales||[]).filter(s=>s.buyerId===p.id).sort((a,b)=>a.date.localeCompare(b.date))[0];
-      return {...p, outstanding, days:oldestSale&&outstanding>0?daysDiff(oldestSale.date):0};
+      return {...p,outstanding,days:oldestSale&&outstanding>0?daysDiff(oldestSale.date):0};
     }).filter(p=>p.outstanding>0).sort((a,b)=>b.outstanding-a.outstanding).slice(0,5)
   ,[state.parties,state.accounts,state.sales]);
 
@@ -1706,15 +1718,32 @@ function Dashboard({ state, setTab }) {
     return months;
   },[state.vouchers]);
   const maxVal=Math.max(...monthlyTrend.map(m=>Math.max(m.purchased,m.sales)),1);
-  const thisMonth=new Date().toISOString().slice(0,7);
-  const grnsThisMonth=state.grns.filter(g=>(g.date||"").startsWith(thisMonth)).length;
-  const salesThisMonth=(state.sales||[]).filter(s=>(s.date||"").startsWith(thisMonth)).length;
 
-  const totalPayable=Object.values(state.parties).filter(p=>p.partyType==="supplier").reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
-  const totalReceivable=Object.values(state.parties).filter(p=>p.partyType==="customer").reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
+  // ── YERCAUD DATA ─────────────────────────────────────────────────
+  const yercaudCashBal = state.accounts[YERCAUD_CASH_ID]?.balance||0;
+  const yercaudGRNs    = state.grns.filter(g=>(g.location||"").toLowerCase()==="yercaud");
+  const yercaudPayments= state.yercaudPayments||[];
+  const yercaudTodayPay= yercaudPayments.filter(p=>p.date===todayStr);
 
-  const Stat=({icon,label,value,color,sub})=>(
-    <div style={{...sh.card,flex:1,minWidth:140}}>
+  // Transfers received from HO
+  const yercaudTransfers = useMemo(()=>
+    state.vouchers.filter(v=>v.voucherType==="CV"&&v.entries?.some(e=>e.accountId===YERCAUD_CASH_ID&&parseFloat(e.dr||0)>0))
+  ,[state.vouchers]);
+  const totalTransferred = yercaudTransfers.reduce((s,v)=>s+v.entries.filter(e=>e.accountId===YERCAUD_CASH_ID).reduce((t,e)=>t+parseFloat(e.dr||0),0),0);
+
+  // Yercaud expenses from PV vouchers debiting Yercaud cash
+  const yercaudExpenseTotal = useMemo(()=>
+    state.vouchers.filter(v=>v.voucherType==="PV"&&v.entries?.some(e=>e.accountId===YERCAUD_CASH_ID&&parseFloat(e.cr||0)>0)&&!v.entries?.some(e=>Object.values(state.parties).some(p=>p.id===e.accountId)))
+    .reduce((s,v)=>s+v.entries.filter(e=>e.accountId===YERCAUD_CASH_ID).reduce((t,e)=>t+parseFloat(e.cr||0),0),0)
+  ,[state.vouchers,state.parties]);
+
+  const totalYercaudPaid = yercaudPayments.reduce((s,p)=>s+parseFloat(p.amount||0),0);
+
+  // Yercaud stock = GRNs entered at Yercaud, not yet transferred
+  const yercaudPendingTransfer = yercaudGRNs.filter(g=>!(state.transfers||[]).some(t=>t.grnId===g.id&&t.status==="accepted")).length;
+
+  const Stat=({icon,label,value,color,sub,onClick})=>(
+    <div onClick={onClick} style={{...sh.card,flex:1,minWidth:140,cursor:onClick?"pointer":"default"}}>
       <div style={{fontSize:20,marginBottom:4}}>{icon}</div>
       <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{label}</div>
       <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:color||C.text,marginTop:4}}>{value}</div>
@@ -1724,135 +1753,246 @@ function Dashboard({ state, setTab }) {
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
         <div>
           <h2 style={{margin:0,color:C.text,fontSize:24,fontWeight:800}}>☕ Coffee Vel International</h2>
-          <p style={{margin:"3px 0 0",color:C.muted,fontSize:13}}>Pattiveeranpatti · {today()}</p>
+          <p style={{margin:"3px 0 0",color:C.muted,fontSize:13}}>{todayStr}</p>
         </div>
-        <div style={{fontSize:12,color:C.muted}}>This month: <strong style={{color:C.text}}>{grnsThisMonth} GRNs</strong> · <strong style={{color:C.text}}>{salesThisMonth} Sales</strong></div>
+        {!isBranch&&<div style={{fontSize:12,color:C.muted}}>This month: <strong style={{color:C.text}}>{grnsThisMonth} GRNs</strong> · <strong style={{color:C.text}}>{salesThisMonth} Sales</strong></div>}
       </div>
-      {/* Alerts */}
-      {(ratePending>0||dryingPending>0||qcPending>0)&&(
-        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-          {ratePending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:`4px solid ${C.red}`,padding:"12px 16px"}}>
-            <div style={{fontSize:11,fontWeight:700,color:C.red,textTransform:"uppercase"}}>⚠️ Rate Pending</div>
-            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:C.red}}>{ratePending}</div>
-            <div style={{fontSize:11,color:C.muted}}>GRNs awaiting rate confirmation</div>
-          </div>}
-          {dryingPending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:"4px solid #f97316",padding:"12px 16px"}}>
-            <div style={{fontSize:11,fontWeight:700,color:"#c2410c",textTransform:"uppercase"}}>⏳ Drying Pending</div>
-            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:"#c2410c"}}>{dryingPending}</div>
-            <div style={{fontSize:11,color:C.muted}}>GRNs awaiting dry weight</div>
-          </div>}
-          {qcPending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:"4px solid #92400e",padding:"12px 16px"}}>
-            <div style={{fontSize:11,fontWeight:700,color:"#92400e",textTransform:"uppercase"}}>🔬 QC Pending</div>
-            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:"#92400e"}}>{qcPending}</div>
-            <div style={{fontSize:11,color:C.muted}}>GRNs awaiting quality report</div>
-          </div>}
-        </div>
-      )}
-      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
-        <Stat icon="💵" label="Cash in Hand"  value={fmt(cash)}            color={cash>=0?C.green:C.red}/>
-        <Stat icon="🏦" label="Bank Balance"  value={fmt(totalBank)}       color={totalBank>=0?C.green:C.red} sub={bankAccounts.length>1?`${bankAccounts.length} accounts`:bankAccounts[0]?.name||"No bank added"}/>
-        <Stat icon="📤" label="Payable"       value={fmt(totalPayable)}    color={C.red}  sub="We owe suppliers"/>
-        <Stat icon="📥" label="Receivable"    value={fmt(totalReceivable)} color={C.blue} sub="Customers owe us"/>
-        <Stat icon={netProfit>=0?"✅":"⚠️"} label={netProfit>=0?"Net Profit":"Net Loss"} value={fmt(Math.abs(netProfit))} color={netProfit>=0?C.green:C.red}/>
-        <Stat icon="📓" label="Vouchers"      value={state.vouchers.length} sub={`${todayVouchers.length} today`}/>
+
+      {/* View Tabs — admin sees both, branch only sees Yercaud */}
+      <div style={{display:"flex",gap:0,borderBottom:`2px solid ${C.border}`}}>
+        {!isBranch&&(
+          <button onClick={()=>setActiveView("hq")} style={{padding:"9px 24px",border:"none",borderBottom:`3px solid ${activeView==="hq"?C.accent:"transparent"}`,background:"transparent",color:activeView==="hq"?C.accent:C.muted,fontWeight:activeView==="hq"?700:500,fontSize:14,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:6}}>
+            🏠 HQ — Pattiveeranpatti
+          </button>
+        )}
+        <button onClick={()=>setActiveView("yercaud")} style={{padding:"9px 24px",border:"none",borderBottom:`3px solid ${activeView==="yercaud"?"#15803d":"transparent"}`,background:"transparent",color:activeView==="yercaud"?"#15803d":C.muted,fontWeight:activeView==="yercaud"?700:500,fontSize:14,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:6}}>
+          🌿 Yercaud Branch
+        </button>
       </div>
-      {bankAccounts.length>0&&(
-        <div style={sh.card}>
-          <div style={{fontWeight:800,marginBottom:10}}>🏦 Bank Accounts</div>
-          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-            {bankAccounts.map(a=>(
-              <div key={a.id} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 16px",minWidth:180}}>
-                <div style={{fontSize:12,fontWeight:700,color:C.muted}}>{a.name}</div>
-                {a.accountNo&&<div style={{fontSize:11,color:C.muted}}>A/C: {a.accountNo}</div>}
-                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:balColor(a),marginTop:4}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {/* Monthly Trend Chart */}
-      <div style={sh.card}>
-        <div style={{fontWeight:800,marginBottom:14}}>📈 Monthly Trend (Last 6 Months)</div>
-        <div style={{display:"flex",gap:4,alignItems:"flex-end",height:120}}>
-          {monthlyTrend.map(m=>(
-            <div key={m.key} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-              <div style={{width:"100%",display:"flex",gap:2,alignItems:"flex-end",height:90}}>
-                <div title={`Purchases: ${fmt(m.purchased)}`} style={{flex:1,background:C.red+"88",borderRadius:"3px 3px 0 0",height:`${Math.max(2,(m.purchased/maxVal)*90)}px`}}/>
-                <div title={`Sales: ${fmt(m.sales)}`}         style={{flex:1,background:C.green+"88",borderRadius:"3px 3px 0 0",height:`${Math.max(2,(m.sales/maxVal)*90)}px`}}/>
-              </div>
-              <div style={{fontSize:10,color:C.muted,textAlign:"center",whiteSpace:"nowrap"}}>{m.label}</div>
+
+      {/* ═══ HQ TAB ═══ */}
+      {activeView==="hq"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:20}}>
+          {/* Alerts */}
+          {(ratePending>0||dryingPending>0||qcPending>0)&&(
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              {ratePending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:`4px solid ${C.red}`,padding:"12px 16px"}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.red,textTransform:"uppercase"}}>⚠️ Rate Pending</div>
+                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:C.red}}>{ratePending}</div>
+                <div style={{fontSize:11,color:C.muted}}>GRNs awaiting rate confirmation</div>
+              </div>}
+              {dryingPending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:"4px solid #f97316",padding:"12px 16px"}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#c2410c",textTransform:"uppercase"}}>⏳ Drying Pending</div>
+                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:"#c2410c"}}>{dryingPending}</div>
+                <div style={{fontSize:11,color:C.muted}}>GRNs awaiting dry weight</div>
+              </div>}
+              {qcPending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:"4px solid #92400e",padding:"12px 16px"}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#92400e",textTransform:"uppercase"}}>🔬 QC Pending</div>
+                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:"#92400e"}}>{qcPending}</div>
+                <div style={{fontSize:11,color:C.muted}}>GRNs awaiting quality report</div>
+              </div>}
             </div>
-          ))}
-        </div>
-        <div style={{display:"flex",gap:16,marginTop:8}}>
-          <span style={{fontSize:11,color:C.muted,display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,background:C.red+"88",borderRadius:2,display:"inline-block"}}></span>Purchases</span>
-          <span style={{fontSize:11,color:C.muted,display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,background:C.green+"88",borderRadius:2,display:"inline-block"}}></span>Sales</span>
-        </div>
-      </div>
-      {/* Top Payables & Receivables */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
-          <div style={{background:"#fee2e2",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.red,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span>📤 Top Payables</span>
-            {setTab&&<button onClick={()=>setTab("outstanding")} style={{background:"none",border:`1px solid ${C.red}`,color:C.red,borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>}
+          )}
+          {/* Stats */}
+          <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+            <Stat icon="💵" label="Cash in Hand"  value={fmt(cash)}            color={cash>=0?C.green:C.red}/>
+            <Stat icon="🏦" label="Bank Balance"  value={fmt(totalBank)}       color={totalBank>=0?C.green:C.red} sub={bankAccounts.length>1?`${bankAccounts.length} accounts`:bankAccounts[0]?.name||"No bank added"}/>
+            <Stat icon="📤" label="Payable"       value={fmt(totalPayable)}    color={C.red}   sub="We owe suppliers"/>
+            <Stat icon="📥" label="Receivable"    value={fmt(totalReceivable)} color={C.blue}  sub="Customers owe us"/>
+            <Stat icon={netProfit>=0?"✅":"⚠️"} label={netProfit>=0?"Net Profit":"Net Loss"} value={fmt(Math.abs(netProfit))} color={netProfit>=0?C.green:C.red}/>
+            <Stat icon="📓" label="Vouchers"      value={state.vouchers.length} sub={`${todayVouchers.length} today`}/>
           </div>
-          {topPayables.length===0?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No pending payables</div>
-          :topPayables.map(p=>(
-            <div key={p.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          {/* Bank accounts */}
+          {bankAccounts.length>0&&(
+            <div style={sh.card}>
+              <div style={{fontWeight:800,marginBottom:10}}>🏦 Bank Accounts</div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                {bankAccounts.map(a=>(
+                  <div key={a.id} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 16px",minWidth:180}}>
+                    <div style={{fontSize:12,fontWeight:700,color:C.muted}}>{a.name}</div>
+                    {a.accountNo&&<div style={{fontSize:11,color:C.muted}}>A/C: {a.accountNo}</div>}
+                    <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:balColor(a),marginTop:4}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Monthly Trend */}
+          <div style={sh.card}>
+            <div style={{fontWeight:800,marginBottom:14}}>📈 Monthly Trend (Last 6 Months)</div>
+            <div style={{display:"flex",gap:4,alignItems:"flex-end",height:120}}>
+              {monthlyTrend.map(m=>(
+                <div key={m.key} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                  <div style={{width:"100%",display:"flex",gap:2,alignItems:"flex-end",height:90}}>
+                    <div title={`Purchases: ${fmt(m.purchased)}`} style={{flex:1,background:C.red+"88",borderRadius:"3px 3px 0 0",height:`${Math.max(2,(m.purchased/maxVal)*90)}px`}}/>
+                    <div title={`Sales: ${fmt(m.sales)}`}         style={{flex:1,background:C.green+"88",borderRadius:"3px 3px 0 0",height:`${Math.max(2,(m.sales/maxVal)*90)}px`}}/>
+                  </div>
+                  <div style={{fontSize:10,color:C.muted,textAlign:"center",whiteSpace:"nowrap"}}>{m.label}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:16,marginTop:8}}>
+              <span style={{fontSize:11,color:C.muted,display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,background:C.red+"88",borderRadius:2,display:"inline-block"}}></span>Purchases</span>
+              <span style={{fontSize:11,color:C.muted,display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,background:C.green+"88",borderRadius:2,display:"inline-block"}}></span>Sales</span>
+            </div>
+          </div>
+          {/* Top Payables & Receivables */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+            <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+              <div style={{background:"#fee2e2",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.red,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>📤 Top Payables</span>
+                {setTab&&<button onClick={()=>setTab("outstanding")} style={{background:"none",border:`1px solid ${C.red}`,color:C.red,borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>}
+              </div>
+              {topPayables.length===0?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No pending payables</div>
+              :topPayables.map(p=>(
+                <div key={p.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13}}>{p.name}</div>
+                    {p.days>0&&<span style={{fontSize:10,...ageingBucket(p.days),padding:"1px 6px",borderRadius:8,fontWeight:700}}>{ageingBucket(p.days).label}</span>}
+                  </div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,color:C.red,fontSize:14}}>{fmt(p.outstanding)}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+              <div style={{background:"#eff6ff",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.blue,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>📥 Top Receivables</span>
+                {setTab&&<button onClick={()=>setTab("outstanding")} style={{background:"none",border:`1px solid ${C.blue}`,color:C.blue,borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>}
+              </div>
+              {topReceivables.length===0?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No pending receivables</div>
+              :topReceivables.map(p=>(
+                <div key={p.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13}}>{p.name}</div>
+                    {p.days>0&&<span style={{fontSize:10,...ageingBucket(p.days),padding:"1px 6px",borderRadius:8,fontWeight:700}}>{ageingBucket(p.days).label}</span>}
+                  </div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,color:C.blue,fontSize:14}}>{fmt(p.outstanding)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Stock on Hand */}
+          {hqStockItems.length>0&&(
+            <div style={sh.card}>
+              <div style={{fontWeight:800,marginBottom:10}}>☕ Stock on Hand</div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                {hqStockItems.map(([item,qty])=>(
+                  <div key={item} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px"}}>
+                    <div style={{fontSize:12,fontWeight:700,color:C.accent}}>{item}</div>
+                    <div style={{fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmtQ(qty)} kg</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Today's entries */}
+          {todayVouchers.length>0&&(
+            <div style={sh.card}>
+              <div style={{fontWeight:800,marginBottom:10}}>📅 Today's Entries</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {todayVouchers.map(v=>{
+                  const amt=v.entries.reduce((s,e)=>s+parseFloat(e.dr||0),0);
+                  return(<div key={v.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 10px",background:C.cream,borderRadius:8,flexWrap:"wrap"}}>
+                    <VBadge type={v.voucherType}/>
+                    <span style={{fontSize:12,color:C.muted,minWidth:90}}>{v.id}</span>
+                    <span style={{flex:1,fontSize:13}}>{v.narration||"—"}</span>
+                    <span style={{fontFamily:"monospace",fontWeight:700,color:C.accent}}>{fmt(amt)}</span>
+                  </div>);
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══ YERCAUD TAB ═══ */}
+      {activeView==="yercaud"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:20}}>
+          {/* Yercaud cash balance hero */}
+          <div style={{...sh.card,background:"linear-gradient(135deg,#14532d,#15803d)",color:"#fff",borderRadius:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
               <div>
-                <div style={{fontWeight:700,fontSize:13}}>{p.name}</div>
-                {p.days>0&&<span style={{fontSize:10,...ageingBucket(p.days),padding:"1px 6px",borderRadius:8,fontWeight:700}}>{ageingBucket(p.days).label}</span>}
+                <div style={{fontSize:12,opacity:0.8,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>🌿 Yercaud Cash Balance</div>
+                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:32,color:yercaudCashBal>=0?"#86efac":"#fca5a5"}}>{fmt(yercaudCashBal)}</div>
+                <div style={{fontSize:12,opacity:0.7,marginTop:4}}>Available for payments & expenses</div>
               </div>
-              <div style={{fontFamily:"monospace",fontWeight:800,color:C.red,fontSize:14}}>{fmt(p.outstanding)}</div>
+              <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:11,opacity:0.7,textTransform:"uppercase"}}>Received from HO</div>
+                  <div style={{fontFamily:"monospace",fontWeight:700,fontSize:16,color:"#86efac"}}>{fmt(totalTransferred)}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:11,opacity:0.7,textTransform:"uppercase"}}>Paid to Suppliers</div>
+                  <div style={{fontFamily:"monospace",fontWeight:700,fontSize:16,color:"#fde68a"}}>{fmt(totalYercaudPaid)}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:11,opacity:0.7,textTransform:"uppercase"}}>Expenses</div>
+                  <div style={{fontFamily:"monospace",fontWeight:700,fontSize:16,color:"#fca5a5"}}>{fmt(yercaudExpenseTotal)}</div>
+                </div>
+              </div>
             </div>
-          ))}
-        </div>
-        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
-          <div style={{background:"#eff6ff",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.blue,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span>📥 Top Receivables</span>
-            {setTab&&<button onClick={()=>setTab("outstanding")} style={{background:"none",border:`1px solid ${C.blue}`,color:C.blue,borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>}
           </div>
-          {topReceivables.length===0?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No pending receivables</div>
-          :topReceivables.map(p=>(
-            <div key={p.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div>
-                <div style={{fontWeight:700,fontSize:13}}>{p.name}</div>
-                {p.days>0&&<span style={{fontSize:10,...ageingBucket(p.days),padding:"1px 6px",borderRadius:8,fontWeight:700}}>{ageingBucket(p.days).label}</span>}
-              </div>
-              <div style={{fontFamily:"monospace",fontWeight:800,color:C.blue,fontSize:14}}>{fmt(p.outstanding)}</div>
+
+          {/* Yercaud stat cards */}
+          <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+            <Stat icon="📋" label="Yercaud GRNs"     value={yercaudGRNs.length}          color={C.accent}  sub={`${grnsThisMonth} this month`}/>
+            <Stat icon="🚛" label="Pending Transfer"  value={yercaudPendingTransfer}       color={yercaudPendingTransfer>0?C.red:C.green} sub="GRNs not yet sent to HQ" onClick={()=>setTab&&setTab("transfer")}/>
+            <Stat icon="📤" label="Today's Payments"  value={yercaudTodayPay.length}       color={C.accent}  sub={fmt(yercaudTodayPay.reduce((s,p)=>s+parseFloat(p.amount||0),0))}/>
+            <Stat icon="🏦" label="HO Transfers"      value={yercaudTransfers.length}      color={C.blue}    sub={fmt(totalTransferred)} onClick={()=>setTab&&setTab("yercaud")}/>
+          </div>
+
+          {/* Recent Yercaud payments */}
+          <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+            <div style={{background:"#f0fdf4",padding:"10px 16px",fontWeight:800,fontSize:13,color:"#15803d",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span>📤 Recent Supplier Payments</span>
+              <button onClick={()=>setTab&&setTab("yercaud")} style={{background:"none",border:"1px solid #15803d",color:"#15803d",borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>
             </div>
-          ))}
-        </div>
-      </div>
-      {stockItems.length>0&&(
-        <div style={sh.card}>
-          <div style={{fontWeight:800,marginBottom:10}}>☕ Stock on Hand</div>
-          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-            {stockItems.map(([item,qty])=>(
-              <div key={item} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px"}}>
-                <div style={{fontSize:12,fontWeight:700,color:C.accent}}>{item}</div>
-                <div style={{fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmtQ(qty)} kg</div>
-              </div>
-            ))}
+            {yercaudPayments.length===0
+              ?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No payments yet</div>
+              :yercaudPayments.slice(0,5).map((p,i)=>{
+                const party=state.parties[p.partyId];
+                return(
+                  <div key={p.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",background:i%2===0?C.surface:C.cream}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13}}>{party?.name||"—"}</div>
+                      <div style={{fontSize:11,color:C.muted}}>{p.date} · {p.narration||"Advance payment"}</div>
+                    </div>
+                    <div style={{fontFamily:"monospace",fontWeight:800,color:"#15803d",fontSize:14}}>{fmt(p.amount)}</div>
+                  </div>
+                );
+              })}
           </div>
-        </div>
-      )}
-      {todayVouchers.length>0&&(
-        <div style={sh.card}>
-          <div style={{fontWeight:800,marginBottom:10}}>📅 Today's Entries</div>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {todayVouchers.map(v=>{
-              const amt=v.entries.reduce((s,e)=>s+parseFloat(e.dr||0),0);
-              return(<div key={v.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 10px",background:C.cream,borderRadius:8,flexWrap:"wrap"}}>
-                <VBadge type={v.voucherType}/>
-                <span style={{fontSize:12,color:C.muted,minWidth:90}}>{v.id}</span>
-                <span style={{flex:1,fontSize:13}}>{v.narration||"—"}</span>
-                <span style={{fontFamily:"monospace",fontWeight:700,color:C.accent}}>{fmt(amt)}</span>
-              </div>);
-            })}
+
+          {/* Recent Yercaud GRNs */}
+          <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+            <div style={{background:"#fdf4ff",padding:"10px 16px",fontWeight:800,fontSize:13,color:"#7c3aed",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span>📋 Recent GRNs from Yercaud</span>
+              <button onClick={()=>setTab&&setTab("grn")} style={{background:"none",border:"1px solid #7c3aed",color:"#7c3aed",borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>
+            </div>
+            {yercaudGRNs.length===0
+              ?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No GRNs from Yercaud yet</div>
+              :yercaudGRNs.slice(0,5).map((g,i)=>{
+                const party=state.parties[g.partyId];
+                const transferred=(state.transfers||[]).some(t=>t.grnId===g.id&&t.status==="accepted");
+                return(
+                  <div key={g.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",background:i%2===0?C.surface:C.cream}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13}}>{g.id} · {party?.name||"—"}</div>
+                      <div style={{fontSize:11,color:C.muted}}>{g.date} · {g.coffeeType}</div>
+                    </div>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{fontFamily:"monospace",fontWeight:700,fontSize:13,color:"#7c3aed"}}>{parseFloat(g.netWeight||0).toLocaleString("en-IN")} kg</span>
+                      {transferred
+                        ?<span style={{fontSize:11,background:"#dcfce7",color:C.green,padding:"2px 8px",borderRadius:10,fontWeight:700}}>✓ Transferred</span>
+                        :<span style={{fontSize:11,background:"#fef9c3",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⏳ Pending</span>}
+                    </div>
+                  </div>
+                );
+              })}
           </div>
         </div>
       )}
@@ -4166,7 +4306,7 @@ function YercaudModule({ state, dispatch, role }) {
   const [showFund,    setShowFund]    = useState(false);
   const [showExpense, setShowExpense] = useState(false);
   const [confirmId,   setConfirmId]   = useState(null);
-  const [activeTab,   setActiveTab]   = useState("payments"); // payments | expenses
+  const [activeTab,   setActiveTab]   = useState("payments"); // payments | expenses | transfers
   const [filterParty, setFilterParty] = useState("all");
   const [filterMonth, setFilterMonth] = useState("");
 
@@ -4188,8 +4328,7 @@ function YercaudModule({ state, dispatch, role }) {
 
   const canPost   = ROLES[role]?.canPost;
   const canDelete = ROLES[role]?.canDelete;
-
-  const suppliers = Object.values(state.parties).filter(p=>p.partyType==="supplier");
+  const isBranch  = role === "branch";
   const yercaudCash = state.accounts[YERCAUD_CASH_ID];
   const yercaudBal  = yercaudCash?.balance || 0;
 
@@ -4242,6 +4381,23 @@ function YercaudModule({ state, dispatch, role }) {
     });
     return map;
   }, [payments]);
+
+  // Cash transfers TO Yercaud = CV vouchers that Dr Yercaud Cash
+  const cashTransfers = useMemo(()=>
+    state.vouchers.filter(v=>
+      v.voucherType==="CV" &&
+      v.entries?.some(e=>e.accountId===YERCAUD_CASH_ID && parseFloat(e.dr||0)>0)
+    ).map(v=>({
+      id: v.id,
+      date: v.date,
+      narration: v.narration||"",
+      amount: v.entries.filter(e=>e.accountId===YERCAUD_CASH_ID).reduce((s,e)=>s+parseFloat(e.dr||0),0),
+      fromAccountId: v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId||"",
+      fromAccountName: state.accounts[v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId]?.name||"HQ",
+    })).sort((a,b)=>b.date.localeCompare(a.date))
+  ,[state.vouchers, state.accounts]);
+
+  const totalTransferred = cashTransfers.reduce((s,t)=>s+t.amount,0);
 
   const submitPayment = async () => {
     if (!pForm.partyId)              { setPErr("Select a supplier"); return; }
@@ -4310,7 +4466,7 @@ function YercaudModule({ state, dispatch, role }) {
         </div>
         {canPost&&(
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            <Btn onClick={()=>setShowFund(true)} variant="outline" size="md">💰 Fund Yercaud Cash</Btn>
+            {!isBranch&&<Btn onClick={()=>{setShowFund(true);setActiveTab("transfers");}} variant="outline" size="md">🏦 Send Cash to Yercaud</Btn>}
             <Btn onClick={()=>{setShowExpense(true);setActiveTab("expenses");}} variant="outline" size="md">🧾 New Expense</Btn>
             <Btn onClick={()=>{setShowForm(true);setActiveTab("payments");}} variant="success" size="lg">+ New Payment</Btn>
           </div>
@@ -4324,6 +4480,12 @@ function YercaudModule({ state, dispatch, role }) {
           <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Yercaud Cash Balance</div>
           <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:yercaudBal>=0?C.green:C.red,marginTop:4}}>{fmt(yercaudBal)}</div>
           <div style={{fontSize:11,color:C.muted,marginTop:2}}>Available to pay / spend</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
+          <div style={{fontSize:18,marginBottom:4}}>🏦</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>HO Transfers</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.blue,marginTop:4}}>{fmt(totalTransferred)}</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:1}}>{cashTransfers.length} transfer{cashTransfers.length!==1?"s":""}</div>
         </div>
         <div style={{...sh.card,flex:"1 1 130px"}}>
           <div style={{fontSize:18,marginBottom:4}}>📤</div>
@@ -4344,21 +4506,21 @@ function YercaudModule({ state, dispatch, role }) {
 
       {/* Sub-tabs */}
       <div style={{display:"flex",gap:0,borderBottom:`2px solid ${C.border}`}}>
-        {[["payments","📤 Supplier Payments"],["expenses","🧾 Expenses"]].map(([id,label])=>(
+        {[["payments","📤 Supplier Payments"],["expenses","🧾 Expenses"],["transfers","🏦 Cash Transfers"]].map(([id,label])=>(
           <button key={id} onClick={()=>setActiveTab(id)} style={{padding:"9px 20px",border:"none",borderBottom:`3px solid ${activeTab===id?C.accent:"transparent"}`,background:"transparent",color:activeTab===id?C.accent:C.muted,fontWeight:activeTab===id?700:500,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
         ))}
       </div>
 
-      {/* Fund Yercaud Cash form */}
+      {/* Fund form — shown when transfers tab active or showFund triggered */}
       {showFund&&(
         <div style={{...sh.card,border:`2px solid ${C.blue}44`,background:"#f0f9ff"}}>
-          <div style={{fontWeight:800,color:C.blue,marginBottom:14,fontSize:15}}>💰 Fund Yercaud Cash</div>
+          <div style={{fontWeight:800,color:C.blue,marginBottom:14,fontSize:15}}>🏦 Transfer Cash: HO → Yercaud</div>
           <div style={{fontSize:13,color:C.muted,marginBottom:14,padding:"8px 12px",background:"#dbeafe",borderRadius:6}}>
-            Transfer money from main Cash or Bank → Yercaud Cash account. Use this whenever someone carries cash to Yercaud or withdraws from bank for Yercaud operations.
+            Select the HO account to send from. The amount will be credited to Yercaud Cash immediately. Use this whenever cash or a bank transfer is sent to the Yercaud branch.
           </div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
             <Field label="Date"><input type="date" value={fForm.date} onChange={e=>setFForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
-            <Field label="From Account (Source)">
+            <Field label="From Account (HO)">
               <select value={fForm.fromAccount} onChange={e=>setFForm(f=>({...f,fromAccount:e.target.value}))} style={sh.input}>
                 {fundSources.map(a=>(
                   <option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>
@@ -4369,13 +4531,13 @@ function YercaudModule({ state, dispatch, role }) {
               <input type="number" value={fForm.amount} onChange={e=>setFForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input} autoFocus/>
             </Field>
             <Field label="Narration">
-              <input value={fForm.narration} onChange={e=>setFForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Cash sent with driver" style={sh.input}/>
+              <input value={fForm.narration} onChange={e=>setFForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Cash sent with Rajan" style={sh.input}/>
             </Field>
           </div>
           {parseFloat(fForm.amount||0)>0&&(
             <div style={{marginTop:12,padding:"10px 14px",background:"#dbeafe",borderRadius:8,fontSize:13}}>
               <strong>{state.accounts[fForm.fromAccount]?.name}</strong> → <strong>Yercaud Cash</strong>: <span style={{fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(fForm.amount)}</span>
-              <span style={{color:C.muted,marginLeft:8,fontSize:12}}>Contra entry (CV)</span>
+              <span style={{color:C.muted,marginLeft:8,fontSize:12}}>Contra entry (CV) · both sides update instantly</span>
             </div>
           )}
           {fErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{fErr}</div>}
@@ -4640,12 +4802,76 @@ function YercaudModule({ state, dispatch, role }) {
           )}
         </div>
       )}
+      {/* TRANSFERS TAB */}
+      {activeTab==="transfers"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {/* HQ-only send button */}
+          {!isBranch&&canPost&&(
+            <div style={{display:"flex",justifyContent:"flex-end"}}>
+              <Btn onClick={()=>setShowFund(true)} variant="primary" size="lg">🏦 Send Cash to Yercaud</Btn>
+            </div>
+          )}
+          {/* Branch view info */}
+          {isBranch&&(
+            <div style={{padding:"10px 16px",background:"#eff6ff",border:`1px solid #bfdbfe`,borderRadius:8,fontSize:13,color:C.blue}}>
+              📥 This shows all cash transfers received from Head Office. Contact HO to send more funds.
+            </div>
+          )}
+          {/* Current balance highlight */}
+          <div style={{...sh.card,background:yercaudBal>=0?"#f0fdf4":"#fff1f2",border:`2px solid ${yercaudBal>=0?C.green:C.red}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Current Yercaud Cash Balance</div>
+              <div style={{fontFamily:"monospace",fontWeight:800,fontSize:26,color:yercaudBal>=0?C.green:C.red,marginTop:2}}>{fmt(yercaudBal)}</div>
+            </div>
+            <div style={{textAlign:"right",fontSize:12,color:C.muted}}>
+              <div>Total received from HO: <strong style={{color:C.blue,fontFamily:"monospace"}}>{fmt(totalTransferred)}</strong></div>
+              <div>Paid to suppliers: <strong style={{color:C.accent,fontFamily:"monospace"}}>{fmt(payments.reduce((s,p)=>s+parseFloat(p.amount||0),0))}</strong></div>
+              <div>Spent on expenses: <strong style={{color:C.red,fontFamily:"monospace"}}>{fmt(totalExpenses)}</strong></div>
+            </div>
+          </div>
+          {/* Transfer history */}
+          {cashTransfers.length===0?(
+            <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+              <div style={{fontSize:40,marginBottom:8}}>🏦</div>
+              No cash transfers yet. {!isBranch?"Click 'Send Cash to Yercaud' to transfer funds.":"Ask HO to transfer funds."}
+            </div>
+          ):(
+            <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+              <div style={{background:"#eff6ff",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.blue,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>🏦 HO → Yercaud Transfer History</span>
+                <span style={{fontFamily:"monospace",fontWeight:700,color:C.blue}}>{fmt(totalTransferred)} total sent</span>
+              </div>
+              <table style={{width:"100%",borderCollapse:"collapse"}}>
+                <thead><tr style={{background:"#f0f9ff"}}>
+                  <th style={sh.th}>Voucher</th>
+                  <th style={sh.th}>Date</th>
+                  <th style={sh.th}>From (HO Account)</th>
+                  <th style={sh.th}>Narration</th>
+                  <th style={{...sh.th,textAlign:"right"}}>Amount (₹)</th>
+                </tr></thead>
+                <tbody>
+                  {cashTransfers.map((t,i)=>(
+                    <tr key={t.id} style={{background:i%2===0?C.surface:C.cream}}>
+                      <td style={{...sh.td,fontFamily:"monospace",fontSize:11,fontWeight:700,color:C.blue}}>{t.id}</td>
+                      <td style={sh.td}>{t.date}</td>
+                      <td style={{...sh.td,fontWeight:600}}>{t.fromAccountName}</td>
+                      <td style={{...sh.td,fontSize:12,color:C.muted,fontStyle:"italic"}}>{t.narration||"—"}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(t.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot><tr style={{background:"#eff6ff"}}>
+                  <td colSpan={4} style={{padding:"10px 16px",fontWeight:800,color:C.blue}}>Total Transferred</td>
+                  <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(totalTransferred)}</td>
+                </tr></tfoot>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
-
-
-// ── OPENING BALANCE MODULE ────────────────────────────────────────
 function OpeningBalanceModule({ state, dispatch }) {
   const [date, setDate]     = useState(today());
   const [balances, setBalances] = useState({});
@@ -5723,12 +5949,40 @@ export default function App() {
       setHullingJobs(hullList||[]);
       setSales(salesList||[]);
       setTransfers(transferList||[]);
-      setYercaudPayments(yercaudList||[]);
-      setLoadmanCharges(ldCharges||[]);
+      setYercaudPayments((yercaudList||[]).map(p=>({
+        ...p,
+        partyId:     p.party_id     || p.partyId     || "",
+        paymentMode: p.payment_mode || p.paymentMode || "cash",
+      })));
+      setLoadmanCharges((ldCharges||[]).map(c=>({
+        ...c,
+        serviceType: c.service_type || c.serviceType || "",
+        weightKg:    c.weight_kg    || c.weightKg    || 0,
+        whoBearsIt:  c.who_bears_it || c.whoBearsIt  || "company",
+        partyId:     c.party_id     || c.partyId     || "",
+        linkedTo:    c.linked_to    || c.linkedTo    || "standalone",
+        linkedId:    c.linked_id    || c.linkedId    || "",
+      })));
       setLoadmanRates(ldRates||[]);
       setLorryOwners(lorryOwnerList||[]);
-      setLorryRentals(lorryRentalList||[]);
-      setLorryPayments(lorryPayList||[]);
+      setLorryRentals((lorryRentalList||[]).map(r=>({
+        ...r,
+        lorryOwnerId:  r.lorry_owner_id || r.lorryOwnerId  || "",
+        vehicleNo:     r.vehicle_no      || r.vehicleNo     || "",
+        fromLocation:  r.from_location   || r.fromLocation  || "",
+        toLocation:    r.to_location     || r.toLocation    || "",
+        weightKg:      r.weight_kg       || r.weightKg      || 0,
+        whoBearsIt:    r.who_bears_it    || r.whoBearsIt    || "company",
+        partyId:       r.party_id        || r.partyId       || "",
+        linkedTo:      r.linked_to       || r.linkedTo      || "standalone",
+        linkedId:      r.linked_id       || r.linkedId      || "",
+      })));
+      setLorryPayments((lorryPayList||[]).map(p=>({
+        ...p,
+        ownerId:        p.owner_id        || p.ownerId        || "",
+        paymentMode:    p.payment_mode    || p.paymentMode    || "cash",
+        paymentAccount: p.payment_account || p.paymentAccount || "cash",
+      })));
     } catch(e) {
       setError("Failed to load data: " + e.message);
     }
@@ -5805,7 +6059,6 @@ export default function App() {
               { accountId: "drying",             dr: 0, cr: action.data.totalCharge, narration: `Drying charges - ${id}` },
             ];
             await db.addVoucher({ id:vId, voucherType:"RV", date:action.data.date, narration:`Drying charges for ${id}`, reference:id, entries, items:[] });
-            await db.applyEntries(accounts, entries, 1);
           }
           break;
         }
@@ -5841,7 +6094,6 @@ export default function App() {
               { accountId: "drying",             dr: 0, cr: action.data.totalCharge, narration: `Storage charges - ${id}` },
             ];
             await db.addVoucher({ id:vId, voucherType:"RV", date:action.data.date, narration:`Storage charges for ${id}`, reference:id, entries, items:[] });
-            await db.applyEntries(accounts, entries, 1);
           }
           break;
         }
@@ -5887,7 +6139,6 @@ export default function App() {
               ];
             }
             await db.addVoucher({id:vId,voucherType:"JV",date:d.date,narration:`Curing charges ${id} (${d.inputQty}kg × ₹${d.curingRate})`,reference:id,entries,items:[]});
-            await db.applyEntries(accounts,entries,1);
           }
           break;
         }
@@ -5910,7 +6161,6 @@ export default function App() {
           ];
           const items = d.items.map(it=>({itemName:it.grade,qty:it.qty,unit:"kg",rate:it.rate||0,amount:it.amount}));
           await db.addVoucher({id:vId,voucherType:"SV",date:d.date,narration:`Sales ${id}${d.narration?` - ${d.narration}`:""}`,reference:id,entries,items});
-          await db.applyEntries(accounts,entries,1);
           break;
         }
         case "DELETE_SALE": await db.deleteSale(action.id); break;
@@ -5970,8 +6220,7 @@ export default function App() {
         case "EDIT_PARTY": {
           const isCustomer = action.data.partyType === "customer";
           await db.editParty(action.id, action.data);
-          await db.patchBalance(action.id, accounts[action.id]?.balance||0); // keep balance
-          // Update account group/type too
+          // Update account name, group and type
           await sb("PATCH","cv_accounts",{
             body:{
               name: action.data.name,
@@ -6006,21 +6255,17 @@ export default function App() {
             entries: action.data.entries||[],
             items: action.data.items||[],
           });
-          await db.applyEntries(accounts, action.data.entries||[], 1);
           break;
         }
         case "DELETE_VOUCHER": {
           const v = vouchers.find(x=>x.id===action.id);
           if (!v) break;
-          await db.applyEntries(accounts, v.entries||[], -1);
           await db.deleteVoucher(action.id);
           break;
         }
         case "EDIT_VOUCHER": {
           const old = vouchers.find(x=>x.id===action.id);
           if (!old) break;
-          await db.applyEntries(accounts, old.entries||[], -1);
-          await db.applyEntries(accounts, action.data.entries||[], 1);
           await db.patchVoucher(action.id, {
             voucherType: action.data.voucherType,
             date: action.data.date,
@@ -6083,7 +6328,6 @@ export default function App() {
               {accountId:d.partyId,   dr:0, cr:d.purchaseValue, narration:`Purchase - ${id}`},
             ];
             await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${id}`,reference:id,entries,items:[{itemName:d.coffeeType,qty:d.netWeight,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
-            await db.applyEntries(accounts,entries,1);
           }
 
           // Drying charge handling - always on dry kg
@@ -6106,7 +6350,6 @@ export default function App() {
               ];
             }
             await db.addVoucher({id:vId,voucherType:"JV",date:d.date,narration:`Drying charges GRN ${id} (${d.dryKg}kg × ₹${d.dryingRate})`,reference:id,entries,items:[]});
-            await db.applyEntries(accounts,entries,1);
           }
           break;
         }
@@ -6159,7 +6402,6 @@ export default function App() {
               {accountId:d.partyId,   dr:0, cr:d.purchaseValue, narration:`Purchase - ${action.id}`},
             ];
             await db.addVoucher({id:vId,voucherType:"PuV",date:d.date,narration:`Purchase GRN ${action.id}`,reference:action.id,entries,items:[{itemName:d.coffeeType,qty:billingQty,unit:"kg",rate:d.rate,amount:d.purchaseValue}]});
-            await db.applyEntries(accounts,entries,1);
           }
 
           // Post drying voucher if dryKg is set, drying charge > 0, and no drying voucher exists yet
@@ -6183,7 +6425,6 @@ export default function App() {
               ];
             }
             await db.addVoucher({id:vId,voucherType:"JV",date:d.date,narration:`Drying charges GRN ${action.id} (${newDryKg}kg × ₹${d.dryingRate})`,reference:action.id,entries,items:[]});
-            await db.applyEntries(accounts,entries,1);
           }
           break;
         }
@@ -6231,7 +6472,6 @@ export default function App() {
           const vId = `JV-${String(vSeq).padStart(4,"0")}`;
           await db.incSeq("JV", vSeq);
           await db.addVoucher({id:vId, voucherType:"JV", date, narration:"Opening Balances", reference:"OPENING", entries, items:[]});
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
 
@@ -6250,7 +6490,21 @@ export default function App() {
           const seq = await db.getLoadmanSeq().catch(()=>1);
           const id = `LDM-${String(seq).padStart(4,"0")}`;
           await db.incLoadmanSeq(seq).catch(()=>{});
-          await db.addLoadmanCharge({id, ...d});
+          await db.addLoadmanCharge({
+            id,
+            date:         d.date,
+            service_type: d.serviceType,
+            unit:         d.unit,
+            bags:         parseFloat(d.bags||0),
+            weight_kg:    parseFloat(d.weightKg||0),
+            rate:         parseFloat(d.rate||0),
+            amount:       d.amount,
+            who_bears_it: d.whoBearsIt||"company",
+            party_id:     d.partyId||null,
+            linked_to:    d.linkedTo||"standalone",
+            linked_id:    d.linkedId||"",
+            narration:    d.narration||"",
+          });
           // Ensure accounts exist
           if (!accounts[LOADMAN_PAYABLE_ID]) {
             await db.addAccount({id:LOADMAN_PAYABLE_ID, name:"Loadman Payable", group:"Creditors", type:"liability", balance:0});
@@ -6274,12 +6528,10 @@ export default function App() {
             ];
           }
           await db.addVoucher({id:vId, voucherType:"JV", date:d.date, narration:`Loadman - ${d.serviceType}${d.linkedId?` (${d.linkedId})`:""}`, reference:id, entries, items:[]});
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
         case "DELETE_LOADMAN_CHARGE": {
           const linked = vouchers.find(v=>v.reference===action.id&&v.voucherType==="JV");
-          if (linked) { await db.applyEntries(accounts, linked.entries||[], -1); await db.deleteVoucher(linked.id); }
           await db.deleteLoadmanCharge(action.id);
           break;
         }
@@ -6296,7 +6548,6 @@ export default function App() {
             {accountId:d.paymentAccount,    dr:0,        cr:d.amount, narration:`Loadman payment`},
           ];
           await db.addVoucher({id:vId, voucherType:"PV", date:d.date, narration:`Loadman payment - ${d.narration||""}`, reference:"", entries, items:[]});
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
 
@@ -6325,7 +6576,24 @@ export default function App() {
           const seq = await db.getLorrySeq().catch(()=>1);
           const id = `LRY-${String(seq).padStart(4,"0")}`;
           await db.incLorrySeq(seq).catch(()=>{});
-          await db.addLorryRental({id, ...d});
+          await db.addLorryRental({
+            id,
+            date:           d.date,
+            lorry_owner_id: d.lorryOwnerId,
+            vehicle_no:     d.vehicleNo,
+            from_location:  d.fromLocation||"",
+            to_location:    d.toLocation||"",
+            unit:           d.unit||"trip",
+            bags:           parseFloat(d.bags||0),
+            weight_kg:      parseFloat(d.weightKg||0),
+            rate:           parseFloat(d.rate||0),
+            amount:         d.amount,
+            who_bears_it:   d.whoBearsIt||"company",
+            party_id:       d.partyId||null,
+            linked_to:      d.linkedTo||"standalone",
+            linked_id:      d.linkedId||"",
+            narration:      d.narration||"",
+          });
           // Ensure lorry expense account exists
           if (!accounts[LORRY_EXPENSE_ID]) {
             await db.addAccount({id:LORRY_EXPENSE_ID, name:"Lorry Expense", group:"Expenses", type:"expense", balance:0});
@@ -6348,12 +6616,10 @@ export default function App() {
             ];
           }
           await db.addVoucher({id:vId, voucherType:"JV", date:d.date, narration:`Lorry rental ${d.vehicleNo}${d.linkedId?` (${d.linkedId})`:""}`, reference:id, entries, items:[]});
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
         case "DELETE_LORRY_RENTAL": {
           const linked = vouchers.find(v=>v.reference===action.id&&v.voucherType==="JV");
-          if (linked) { await db.applyEntries(accounts, linked.entries||[], -1); await db.deleteVoucher(linked.id); }
           await db.deleteLorryRental(action.id);
           break;
         }
@@ -6363,7 +6629,15 @@ export default function App() {
           const seq = await db.getLorryPaySeq().catch(()=>1);
           const id = `LPY-${String(seq).padStart(4,"0")}`;
           await db.incLorryPaySeq(seq).catch(()=>{});
-          await db.addLorryPayment({id, ...d});
+          await db.addLorryPayment({
+            id,
+            date:            d.date,
+            owner_id:        d.ownerId,
+            amount:          d.amount,
+            payment_mode:    d.paymentMode||"cash",
+            payment_account: d.paymentAccount||"cash",
+            narration:       d.narration||"",
+          });
           const vSeq = await db.getSeq("PV");
           const vId = `PV-${String(vSeq).padStart(4,"0")}`;
           await db.incSeq("PV", vSeq);
@@ -6372,7 +6646,6 @@ export default function App() {
             {accountId:d.paymentAccount, dr:0,        cr:d.amount, narration:`Lorry payment - ${id}`},
           ];
           await db.addVoucher({id:vId, voucherType:"PV", date:d.date, narration:`Lorry payment to ${state.lorryOwners?.find(o=>o.id===d.ownerId)?.name||d.ownerId}`, reference:id, entries, items:[]});
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
 
@@ -6402,7 +6675,6 @@ export default function App() {
             { accountId: d.fromAccount,      dr: 0,        cr: d.amount, narration: d.narration||"Yercaud cash funding" },
           ];
           await db.addVoucher({ id:vId, voucherType:"CV", date:d.date, narration: d.narration||`Funds transferred to Yercaud Cash`, reference:"", entries, items:[] });
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
 
@@ -6420,7 +6692,6 @@ export default function App() {
             { accountId: YERCAUD_CASH_ID,    dr: 0,        cr: d.amount, narration: d.narration||"Yercaud expense" },
           ];
           await db.addVoucher({ id:vId, voucherType:"PV", date:d.date, narration:d.narration||"Yercaud expense", reference:"", entries, items:[] });
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
         case "ADD_YERCAUD_PAYMENT": {
@@ -6442,7 +6713,15 @@ export default function App() {
             });
           }
 
-          await db.addYercaudPayment({ id, ...d });
+          await db.addYercaudPayment({
+            id,
+            date:         d.date,
+            party_id:     d.partyId,
+            amount:       d.amount,
+            payment_mode: d.paymentMode||"cash",
+            reference:    d.reference||"",
+            narration:    d.narration||"",
+          });
 
           // Post payment voucher: Dr Supplier (reduces payable), Cr Yercaud Cash
           const creditAccount = d.paymentMode==="cash" ? YERCAUD_CASH_ID : (d.bankAccountId||"cash");
@@ -6454,7 +6733,6 @@ export default function App() {
             { accountId: creditAccount,   dr: 0,        cr: d.amount, narration: d.narration||`Yercaud advance - ${id}` },
           ];
           await db.addVoucher({ id:vId, voucherType:"PV", date:d.date, narration:`Yercaud payment to ${state.parties[d.partyId]?.name||d.partyId} - ${id}`, reference:id, entries, items:[] });
-          await db.applyEntries(accounts, entries, 1);
           break;
         }
 
@@ -6462,7 +6740,6 @@ export default function App() {
           // Find and reverse the linked PV voucher
           const linkedVoucher = vouchers.find(v => v.reference===action.id && v.voucherType==="PV");
           if (linkedVoucher) {
-            await db.applyEntries(accounts, linkedVoucher.entries||[], -1);
             await db.deleteVoucher(linkedVoucher.id);
           }
           await db.deleteYercaudPayment(action.id);
@@ -6574,7 +6851,7 @@ export default function App() {
             <button onClick={()=>setError("")} style={{background:"none",border:"none",cursor:"pointer",color:C.red,fontSize:18}}>×</button>
           </div>
         )}
-        {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch} setTab={setTab}/>}
+        {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch} setTab={setTab} role={role}/>}
         {tab==="grn"       && <GRNModule      state={{...state, grns: isBranch ? state.grns.filter(g=>g.location===userLoc||!g.location) : state.grns}} dispatch={dispatch} role={role} currentUser={currentUser}/>}
         {tab==="yercaud"   && <YercaudModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="loadman"   && <LoadmanModule  state={state} dispatch={dispatch} role={role}/>}
