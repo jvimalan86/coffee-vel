@@ -6021,21 +6021,17 @@ export default function App() {
   // Compute stock from vouchers (no separate stock table needed)
   const stock = useMemo(() => {
     const s = {};
-    // GRN IDs that have drying OR hulling — their PuV vouchers should NOT add to stock
-    const dryingGrnRefs = new Set(
-      grns.filter(g => (g.hasDrying===true||g.hasDrying==="true") && parseFloat(g.dryKg||0)>0)
-          .map(g => g.id)
-    );
-    const hulledGrnRefs = new Set(
-      (hullingJobs||[]).map(h => h.grnId).filter(Boolean)
-    );
 
-    // From purchase vouchers only (SV handled by sales records below)
+    const grnIdSet = new Set(grns.map(g=>g.id));
+
+    // From purchase vouchers — only STANDALONE purchases (no GRN reference)
+    // GRN-linked PuV vouchers are handled by the GRN loop below to avoid double-counting
     vouchers.forEach(v => {
       const items = v.items || [];
       const vt = v.voucherType || v.voucher_type;
-      if (vt !== "PuV") return; // Only PuV adds stock here
-      if (v.reference && (dryingGrnRefs.has(v.reference)||hulledGrnRefs.has(v.reference))) return;
+      if (vt !== "PuV") return;
+      // Skip if this PuV is linked to a GRN (GRN loop handles those)
+      if (v.reference && grnIdSet.has(v.reference)) return;
       items.forEach(it => {
         if (!it.itemName) return;
         s[it.itemName] = (s[it.itemName]||0) + parseFloat(it.qty||0);
