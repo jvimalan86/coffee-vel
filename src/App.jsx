@@ -4144,45 +4144,63 @@ function SalesModule({ state, dispatch, role }) {
 
 // ── STOCK TRANSFER MODULE ─────────────────────────────────────────
 function StockTransferModule({ state, dispatch, role, currentUser }) {
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm]         = useState({date:today(),grnId:"",qty:"",bags:"",narration:""});
-  const [err, setErr]           = useState("");
+  const [showForm,    setShowForm]    = useState(false);
+  const [selectedIds, setSelectedIds] = useState({}); // {grnId: {qty, bags}}
+  const [narration,   setNarration]   = useState("");
+  const [date,        setDate]        = useState(today());
+  const [err,         setErr]         = useState("");
   const isBranch   = role==="branch";
   const userLoc    = currentUser?.location||"hq";
   const canPost    = ROLES[role]?.canPost;
   const canDelete  = ROLES[role]?.canDelete;
-  const set = (f,v) => setForm(p=>({...p,[f]:v}));
 
   // Branch sees GRNs from their location not yet fully transferred (accepted)
   const acceptedTransferGrnIds = new Set((state.transfers||[]).filter(t=>t.status==="accepted").map(t=>t.grnId));
   const pendingTransferGrnIds  = new Set((state.transfers||[]).filter(t=>t.status==="pending").map(t=>t.grnId));
   const eligibleGRNs = state.grns.filter(g => {
     if (isBranch && (g.location||"").toLowerCase() !== (userLoc||"").toLowerCase()) return false;
-    if (acceptedTransferGrnIds.has(g.id)) return false; // already accepted at HQ
+    if (acceptedTransferGrnIds.has(g.id)) return false;
     return true;
   });
 
-  const selectedGRN   = state.grns.find(g=>g.id===form.grnId);
-  const maxQty        = selectedGRN ? parseFloat(selectedGRN.dryKg||selectedGRN.netWeight||0) : 0;
+  const toggleGRN = (g) => {
+    const qty = parseFloat(g.dryKg||g.netWeight||0);
+    setSelectedIds(prev => {
+      if (prev[g.id]) {
+        const next = {...prev}; delete next[g.id]; return next;
+      }
+      return {...prev, [g.id]: {qty, bags: parseInt(g.totalBags||g.noOfBags||0)}};
+    });
+  };
 
-  const submit = () => {
-    if (!form.grnId)               { setErr("Select a GRN"); return; }
-    if (!form.qty||parseFloat(form.qty)<=0){ setErr("Enter transfer weight (kg)"); return; }
-    if (parseFloat(form.qty)>maxQty+0.5){ setErr(`Only ${maxQty} kg available`); return; }
+  const selectedCount = Object.keys(selectedIds).length;
+  const totalQty = Object.values(selectedIds).reduce((s,v)=>s+parseFloat(v.qty||0),0);
+  const totalBags = Object.values(selectedIds).reduce((s,v)=>s+parseInt(v.bags||0),0);
+
+  const submit = async () => {
+    if (selectedCount===0) { setErr("Select at least one GRN"); return; }
+    for (const [grnId, vals] of Object.entries(selectedIds)) {
+      if (!vals.qty || parseFloat(vals.qty)<=0) { setErr(`Enter weight for GRN ${grnId}`); return; }
+    }
     setErr("");
-    dispatch({type:"ADD_TRANSFER",data:{
-      date:form.date,
-      grnId:form.grnId,
-      fromLocation:userLoc,
-      toLocation:"hq",
-      coffeeType:selectedGRN?.outputType||selectedGRN?.coffeeType,
-      weightKg:parseFloat(form.qty),
-      bags:parseInt(form.bags||0),
-      narration:form.narration,
-      raisedBy:currentUser?.name,
-    }});
+    for (const [grnId, vals] of Object.entries(selectedIds)) {
+      const grn = state.grns.find(g=>g.id===grnId);
+      await dispatch({type:"ADD_TRANSFER", data:{
+        date,
+        grnId,
+        fromLocation: userLoc,
+        toLocation:   "hq",
+        coffeeType:   grn?.outputType||grn?.coffeeType,
+        weightKg:     parseFloat(vals.qty),
+        bags:         parseInt(vals.bags||0),
+        narration,
+        raisedBy:     currentUser?.name,
+      }});
+    }
     setShowForm(false);
-    setForm({date:today(),grnId:"",qty:"",bags:"",narration:""});
+    setSelectedIds({});
+    setNarration("");
+    setDate(today());
   };
 
   const pending  = (state.transfers||[]).filter(t=>t.status==="pending");
@@ -4197,15 +4215,15 @@ function StockTransferModule({ state, dispatch, role, currentUser }) {
             {isBranch?"Yercaud → Pattiveeranpatti":"Receive stock from Yercaud branch"}
           </p>
         </div>
-        {isBranch&&canPost&&<Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ Raise Transfer</Btn>}
+        {isBranch&&canPost&&<Btn onClick={()=>{setShowForm(v=>!v);setSelectedIds({});setErr("");}} variant="success" size="lg">{showForm?"✕ Cancel":"+ Raise Transfer"}</Btn>}
       </div>
 
       {/* Summary */}
       <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
         {[
-          {icon:"⏳",label:"Pending",    value:pending.length,  color:"#d97706"},
-          {icon:"✅",label:"Accepted",   value:accepted.length, color:C.green},
-          {icon:"📦",label:"Total kg",   value:(state.transfers||[]).reduce((s,t)=>s+parseFloat(t.weightKg||0),0).toLocaleString("en-IN",{maximumFractionDigits:0})+" kg"},
+          {icon:"⏳",label:"Pending",   value:pending.length,  color:"#d97706"},
+          {icon:"✅",label:"Accepted",  value:accepted.length, color:C.green},
+          {icon:"📦",label:"Total kg",  value:(state.transfers||[]).reduce((s,t)=>s+parseFloat(t.weightKg||0),0).toLocaleString("en-IN",{maximumFractionDigits:0})+" kg"},
         ].map(s=>(
           <div key={s.label} style={{...sh.card,flex:1,minWidth:120}}>
             <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
@@ -4215,42 +4233,98 @@ function StockTransferModule({ state, dispatch, role, currentUser }) {
         ))}
       </div>
 
-      {/* New transfer form */}
-      {showForm&&(
+      {/* Multi-GRN transfer form */}
+      {showForm&&isBranch&&(
         <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
-          <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>🚛 Raise Stock Transfer — Yercaud → HQ</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12,marginBottom:14}}>
-            <Field label="Date"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
-            <Field label="Select GRN *">
-              <select value={form.grnId} onChange={e=>set("grnId",e.target.value)} style={{...sh.input,borderColor:!form.grnId?"#f97316":C.border}}>
-                <option value="">— Select GRN —</option>
-                {eligibleGRNs.map(g=>{
-                  const party=state.parties[g.partyId];
-                  const qty=parseFloat(g.dryKg||g.netWeight||0);
-                  const isPending = pendingTransferGrnIds.has(g.id);
-                  return <option key={g.id} value={g.id}>{g.id} · {party?.name||"?"} · {g.coffeeType} · {qty}kg{isPending?" ⏳ Transfer Pending":""}</option>;
-                })}
-              </select>
-            </Field>
-            <Field label={`Weight kg (max ${maxQty} kg)`}>
-              <input type="number" value={form.qty} onChange={e=>set("qty",e.target.value)} placeholder="0" style={sh.input}/>
-            </Field>
-            <Field label="No of bags">
-              <input type="number" value={form.bags} onChange={e=>set("bags",e.target.value)} placeholder="0" style={sh.input}/>
-            </Field>
-            <Field label="Narration">
-              <input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Vehicle no, driver..." style={sh.input}/>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:4,fontSize:15}}>🚛 Raise Stock Transfer — Yercaud → HQ</div>
+          <div style={{fontSize:12,color:C.muted,marginBottom:14}}>Tick the GRNs you want to send in this trip. Adjust kg and bags if needed.</div>
+
+          {/* Date + Narration */}
+          <div style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:12,marginBottom:16}}>
+            <Field label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={sh.input}/></Field>
+            <Field label="Vehicle / Driver / Narration">
+              <input value={narration} onChange={e=>setNarration(e.target.value)} placeholder="e.g. TN-39-X-1234, Rajan" style={sh.input}/>
             </Field>
           </div>
-          {selectedGRN&&(
-            <div style={{padding:"10px 14px",background:"#f0fdf4",borderRadius:6,marginBottom:12,fontSize:12}}>
-              <strong>{selectedGRN.id}</strong> · {selectedGRN.coffeeType} · {state.parties[selectedGRN.partyId]?.name} · {maxQty} kg available
+
+          {/* GRN checklist */}
+          {eligibleGRNs.length===0 ? (
+            <div style={{textAlign:"center",padding:32,color:C.muted,fontSize:13}}>
+              No GRNs available for transfer
+            </div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
+              {eligibleGRNs.map(g=>{
+                const party   = state.parties[g.partyId];
+                const maxQty  = parseFloat(g.dryKg||g.netWeight||0);
+                const maxBags = parseInt(g.totalBags||g.noOfBags||0);
+                const checked = !!selectedIds[g.id];
+                const isPending = pendingTransferGrnIds.has(g.id);
+                return (
+                  <div key={g.id} onClick={()=>toggleGRN(g)} style={{
+                    border:`2px solid ${checked?C.accent:C.border}`,
+                    borderRadius:8,
+                    padding:"10px 14px",
+                    background:checked?"#fdf5ee":C.surface,
+                    cursor:"pointer",
+                    transition:"all 0.1s",
+                  }}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                      {/* Checkbox */}
+                      <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${checked?C.accent:C.muted}`,background:checked?C.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                        {checked&&<span style={{color:"#fff",fontSize:13,fontWeight:800}}>✓</span>}
+                      </div>
+                      {/* GRN info */}
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:700,fontSize:13,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                          <span style={{color:C.accent}}>{g.id}</span>
+                          <span style={{color:C.muted}}>·</span>
+                          <span>{party?.name||"—"}</span>
+                          <span style={{color:C.muted}}>·</span>
+                          <span style={{color:"#7c3aed"}}>{g.coffeeType}</span>
+                          {isPending&&<span style={{fontSize:10,background:"#fef9c3",color:"#92400e",padding:"1px 6px",borderRadius:8,fontWeight:700}}>⏳ Pending</span>}
+                        </div>
+                        <div style={{fontSize:11,color:C.muted,marginTop:2}}>{g.date} · {fmtQ(maxQty)} kg · {maxBags} bags</div>
+                      </div>
+                      {/* Qty + bags inputs (only when checked) */}
+                      {checked&&(
+                        <div style={{display:"flex",gap:8,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
+                          <div>
+                            <div style={{fontSize:10,color:C.muted,marginBottom:2}}>kg</div>
+                            <input type="number" value={selectedIds[g.id].qty}
+                              onChange={e=>setSelectedIds(p=>({...p,[g.id]:{...p[g.id],qty:e.target.value}}))}
+                              style={{...sh.input,width:90,padding:"4px 8px",fontSize:13}}
+                              placeholder="0"/>
+                          </div>
+                          <div>
+                            <div style={{fontSize:10,color:C.muted,marginBottom:2}}>bags</div>
+                            <input type="number" value={selectedIds[g.id].bags}
+                              onChange={e=>setSelectedIds(p=>({...p,[g.id]:{...p[g.id],bags:e.target.value}}))}
+                              style={{...sh.input,width:70,padding:"4px 8px",fontSize:13}}
+                              placeholder="0"/>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
+
+          {/* Summary bar */}
+          {selectedCount>0&&(
+            <div style={{padding:"10px 14px",background:"#fdf5ee",borderRadius:8,marginBottom:12,fontSize:13,display:"flex",gap:20,flexWrap:"wrap",alignItems:"center"}}>
+              <span><strong style={{color:C.accent}}>{selectedCount}</strong> GRN{selectedCount>1?"s":""} selected</span>
+              <span>Total: <strong style={{fontFamily:"monospace",color:C.green}}>{fmtQ(totalQty)} kg</strong></span>
+              <span>Bags: <strong style={{fontFamily:"monospace"}}>{totalBags}</strong></span>
+            </div>
+          )}
+
           {err&&<div style={{color:C.red,fontWeight:700,fontSize:13,padding:"8px 12px",background:"#fee2e2",borderRadius:6,marginBottom:10}}>{err}</div>}
           <div style={{display:"flex",gap:10}}>
-            <Btn onClick={submit} variant="success">✓ Raise Transfer</Btn>
-            <Btn onClick={()=>{setShowForm(false);setErr("");}} variant="ghost">Cancel</Btn>
+            <Btn onClick={submit} variant="success" disabled={selectedCount===0}>✓ Raise {selectedCount>1?`${selectedCount} Transfers`:"Transfer"}</Btn>
+            <Btn onClick={()=>{setShowForm(false);setSelectedIds({});setErr("");}} variant="ghost">Cancel</Btn>
           </div>
         </div>
       )}
