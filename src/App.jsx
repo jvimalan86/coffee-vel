@@ -2207,7 +2207,7 @@ function GRNForm({ state, dispatch, onDone, initial, editId, role, currentUser }
           </Field>
           <Field label="Coffee Type *">
             <select value={form.coffeeType} onChange={e=>set("coffeeType",e.target.value)} style={sh.input}>
-              {GRN_COFFEE_TYPES.map(c=><option key={c} value={c}>{c}</option>)}
+              {(state.coffeeTypes?.length ? state.coffeeTypes.map(c=>c.name) : GRN_COFFEE_TYPES).map(c=><option key={c} value={c}>{c}</option>)}
             </select>
           </Field>
           <Field label="Truck Number *"><input value={form.truckNo} onChange={e=>set("truckNo",e.target.value)} placeholder="TN-XX-X-XXXX" style={sh.input}/></Field>
