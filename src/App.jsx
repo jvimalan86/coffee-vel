@@ -661,11 +661,13 @@ function LedgerView({ state, role, currentUser }) {
       .map(e=>e.accountId)
   ) : null;
 
+  const partyIds = new Set(Object.keys(state.parties||{}));
+
   const visibleAccounts = isBranch
     ? allAccounts.filter(a => {
         if (a.id === YERCAUD_CASH_ID) return true;
-        // Branch sees all supplier/customer party accounts
-        if (a.group === "Creditors" || a.group === "Debtors") return true;
+        // Only show actual party accounts (not internal accounts like Loadman Payable)
+        if ((a.group === "Creditors" || a.group === "Debtors") && partyIds.has(a.id)) return true;
         return false;
       })
     : allAccounts;
@@ -691,15 +693,8 @@ function LedgerView({ state, role, currentUser }) {
     sorted.forEach(v=>{
       v.entries.forEach(e=>{
         if(e.accountId!==selectedAcc) return;
-        // Branch party ledger: only show entries from Yercaud payments (YPV) or tagged entries
-        // This covers both old untagged and new tagged payments
-        if(isBranch && isPartyAccount) {
-          const isYercaudPayment = v.reference?.startsWith("YPV-") ||
-            e.narration?.includes(`[${branchTag}]`) ||
-            v.narration?.includes(`[${branchTag}]`) ||
-            v.entries?.some(en=>en.accountId===YERCAUD_CASH_ID);
-          if (!isYercaudPayment) return;
-        }
+        // Branch sees all entries for party accounts (GRN purchases, payments, etc.)
+        // Yercaud Cash account shows all its own movements
         const dr=parseFloat(e.dr||0), cr=parseFloat(e.cr||0);
         balance += isDebitNormal ? dr-cr : cr-dr;
         lines.push({
