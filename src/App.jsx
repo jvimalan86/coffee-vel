@@ -207,7 +207,11 @@ const PRESET_ACCOUNTS = [
   { id:"purchases", name:"Purchase Account",    group:"Expenses",    type:"expense"   },
   { id:"curing",         name:"Curing Income",   group:"Income",   type:"income"  },
   { id:"curing_expense", name:"Curing Expense",  group:"Expenses", type:"expense" },
-  { id:"drying",    name:"Drying Charges",      group:"Income",      type:"income"    },
+  { id:"drying",         name:"Drying Income",   group:"Income",   type:"income"  },
+  { id:"drying_expense", name:"Drying Expense",  group:"Expenses", type:"expense" },
+  { id:"loadman_payable", name:"Loadman Payable", group:"Creditors", type:"liability" },
+  { id:"loadman_expense", name:"Loadman Expense", group:"Expenses",  type:"expense"  },
+  { id:"lorry_expense",   name:"Lorry Expense",   group:"Expenses",  type:"expense"  },
   { id:"transport", name:"Transport Expenses",  group:"Expenses",    type:"expense"   },
   { id:"salary",    name:"Salary & Wages",      group:"Expenses",    type:"expense"   },
   { id:"capital",   name:"Capital Account",     group:"Capital",     type:"liability" },
@@ -1399,14 +1403,261 @@ function UserManagement({ state, dispatch, currentUser }) {
   );
 }
 
+// ── OUTSTANDING REPORT ────────────────────────────────────────────
+function OutstandingReport({ state }) {
+  const [activeTab, setActiveTab]   = useState("suppliers");
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [expandedId, setExpandedId] = useState(null);
+
+  const supplierData = useMemo(() => {
+    return Object.values(state.parties).filter(p=>p.partyType==="supplier").map(p=>{
+      const acc=state.accounts[p.id];
+      const rawBal=acc?.balance||0;
+      const outstanding=rawBal>0?rawBal:0;
+      const partyGRNs=state.grns.filter(g=>g.partyId===p.id&&(g.grnType==="purchase"||g.grnType==="both"));
+      const purchased=state.vouchers.filter(v=>v.voucherType==="PuV"&&v.entries?.some(e=>e.accountId===p.id)).reduce((s,v)=>s+v.entries.filter(e=>e.accountId===p.id).reduce((t,e)=>t+parseFloat(e.cr||0),0),0);
+      const paid=state.vouchers.filter(v=>(v.voucherType==="PV"||v.voucherType==="RV")&&v.entries?.some(e=>e.accountId===p.id&&parseFloat(e.dr||0)>0)).reduce((s,v)=>s+v.entries.filter(e=>e.accountId===p.id).reduce((t,e)=>t+parseFloat(e.dr||0),0),0);
+      const unpaidGRNs=partyGRNs.filter(g=>!g.ratePending&&parseFloat(g.purchaseValue||0)>0);
+      const oldestDate=unpaidGRNs.length>0?unpaidGRNs.reduce((o,g)=>g.date<o?g.date:o,unpaidGRNs[0].date):null;
+      const daysOut=oldestDate?daysDiff(oldestDate):0;
+      const grnBreakdown=partyGRNs.map(g=>{
+        const grnPurchased=parseFloat(g.purchaseValue||0);
+        const grnPaid=state.vouchers.filter(v=>v.reference===g.id&&(v.voucherType==="PV"||v.voucherType==="RV")).reduce((s,v)=>s+v.entries.filter(e=>e.accountId===p.id).reduce((t,e)=>t+parseFloat(e.dr||0),0),0);
+        return {...g,grnPurchased,grnPaid,grnOutstanding:Math.max(0,grnPurchased-grnPaid),days:daysDiff(g.date)};
+      });
+      return {...p,outstanding,purchased,paid,daysOut,oldestDate,grnBreakdown,statusBadge:statusBadge(outstanding,purchased)};
+    }).filter(p=>p.purchased>0||p.outstanding>0);
+  },[state.parties,state.accounts,state.grns,state.vouchers]);
+
+  const buyerData = useMemo(()=>{
+    return Object.values(state.parties).filter(p=>p.partyType==="customer").map(p=>{
+      const acc=state.accounts[p.id];
+      const rawBal=acc?.balance||0;
+      const outstanding=rawBal>0?rawBal:0;
+      const partySales=(state.sales||[]).filter(s=>s.buyerId===p.id);
+      const sold=state.vouchers.filter(v=>v.voucherType==="SV"&&v.entries?.some(e=>e.accountId===p.id)).reduce((s,v)=>s+v.entries.filter(e=>e.accountId===p.id).reduce((t,e)=>t+parseFloat(e.dr||0),0),0);
+      const received=state.vouchers.filter(v=>v.voucherType==="RV"&&v.entries?.some(e=>e.accountId===p.id&&parseFloat(e.cr||0)>0)).reduce((s,v)=>s+v.entries.filter(e=>e.accountId===p.id).reduce((t,e)=>t+parseFloat(e.cr||0),0),0);
+      const oldestDate=partySales.length>0?partySales.reduce((o,s)=>s.date<o?s.date:o,partySales[0].date):null;
+      const daysOut=oldestDate&&outstanding>0?daysDiff(oldestDate):0;
+      const saleBreakdown=partySales.map(s=>{
+        const salePaid=state.vouchers.filter(v=>v.reference===s.id&&v.voucherType==="RV").reduce((t,v)=>t+v.entries.filter(e=>e.accountId===p.id).reduce((x,e)=>x+parseFloat(e.cr||0),0),0);
+        return {...s,salePaid,saleOutstanding:Math.max(0,parseFloat(s.totalAmount||0)-salePaid),days:daysDiff(s.date)};
+      });
+      return {...p,outstanding,sold,received,daysOut,oldestDate,saleBreakdown,statusBadge:statusBadge(outstanding,sold)};
+    }).filter(p=>p.sold>0||p.outstanding>0);
+  },[state.parties,state.accounts,state.sales,state.vouchers]);
+
+  const filterFn = p => {
+    if(filterStatus==="unpaid")  return p.statusBadge.label==="Unpaid";
+    if(filterStatus==="partial") return p.statusBadge.label==="Partial";
+    if(filterStatus==="paid")    return p.statusBadge.label==="Paid";
+    return true;
+  };
+  const filteredSuppliers=supplierData.filter(filterFn);
+  const filteredBuyers=buyerData.filter(filterFn);
+
+  const AgeChip=({days})=>{const b=ageingBucket(days);return <span style={{background:b.bg,color:b.color,padding:"2px 8px",borderRadius:12,fontSize:11,fontWeight:700}}>{b.label}</span>;};
+  const StatusChip=({sb})=><span style={{background:sb.bg,color:sb.color,padding:"2px 8px",borderRadius:12,fontSize:11,fontWeight:700}}>{sb.label}</span>;
+
+  const totalPayable    = supplierData.reduce((s,p)=>s+p.outstanding,0);
+  const totalPurchased  = supplierData.reduce((s,p)=>s+p.purchased,0);
+  const totalPaid       = supplierData.reduce((s,p)=>s+p.paid,0);
+  const totalReceivable = buyerData.reduce((s,p)=>s+p.outstanding,0);
+  const totalSold       = buyerData.reduce((s,p)=>s+p.sold,0);
+  const totalReceived   = buyerData.reduce((s,p)=>s+p.received,0);
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div>
+        <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📊 Outstanding Report</h2>
+        <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Ageing analysis · Suppliers & Buyers</p>
+      </div>
+      {/* Tabs */}
+      <div style={{display:"flex",gap:0,borderBottom:`2px solid ${C.border}`}}>
+        {[["suppliers","📤 Supplier Payables"],["buyers","📥 Buyer Receivables"]].map(([id,label])=>(
+          <button key={id} onClick={()=>{setActiveTab(id);setExpandedId(null);setFilterStatus("all");}} style={{padding:"9px 20px",border:"none",borderBottom:`3px solid ${activeTab===id?C.accent:"transparent"}`,background:"transparent",color:activeTab===id?C.accent:C.muted,fontWeight:activeTab===id?700:500,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+        ))}
+      </div>
+      {/* Summary Cards */}
+      {activeTab==="suppliers"?(
+        <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+          {[{icon:"📤",label:"Total Payable",value:fmt(totalPayable),color:C.red},{icon:"🛒",label:"Total Purchased",value:fmt(totalPurchased),color:C.text},{icon:"✅",label:"Total Paid",value:fmt(totalPaid),color:C.green},{icon:"⚠️",label:"Unpaid Suppliers",value:supplierData.filter(p=>p.statusBadge.label!=="Paid").length,color:C.red}].map(s=>(
+            <div key={s.label} style={{...sh.card,flex:1,minWidth:150}}>
+              <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+              <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>{s.label}</div>
+              <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:s.color,marginTop:4}}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+      ):(
+        <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+          {[{icon:"📥",label:"Total Receivable",value:fmt(totalReceivable),color:C.blue},{icon:"🏷",label:"Total Sold",value:fmt(totalSold),color:C.text},{icon:"✅",label:"Total Received",value:fmt(totalReceived),color:C.green},{icon:"⚠️",label:"Unpaid Buyers",value:buyerData.filter(p=>p.statusBadge.label!=="Paid").length,color:C.red}].map(s=>(
+            <div key={s.label} style={{...sh.card,flex:1,minWidth:150}}>
+              <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+              <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>{s.label}</div>
+              <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:s.color,marginTop:4}}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* Filter */}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:12,color:C.muted,fontWeight:700}}>Filter:</span>
+        {[["all","All"],["unpaid","Unpaid"],["partial","Partial"],["paid","Paid"]].map(([v,l])=>(
+          <button key={v} onClick={()=>setFilterStatus(v)} style={{padding:"4px 14px",borderRadius:20,border:`1px solid ${filterStatus===v?C.accent:C.border}`,background:filterStatus===v?C.accent:"transparent",color:filterStatus===v?"#fff":C.muted,fontWeight:600,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{l}</button>
+        ))}
+        <span style={{marginLeft:"auto",fontSize:12,color:C.muted}}>{activeTab==="suppliers"?filteredSuppliers.length:filteredBuyers.length} parties</span>
+      </div>
+      {/* Supplier Table */}
+      {activeTab==="suppliers"&&(
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",minWidth:700}}>
+              <thead><tr style={{background:"#f5ede4"}}>
+                <th style={sh.th}>Supplier</th><th style={{...sh.th,textAlign:"right"}}>Purchased</th><th style={{...sh.th,textAlign:"right"}}>Paid</th><th style={{...sh.th,textAlign:"right"}}>Outstanding</th><th style={sh.th}>Status</th><th style={sh.th}>Ageing</th><th style={sh.th}>GRNs</th>
+              </tr></thead>
+              <tbody>
+                {filteredSuppliers.length===0?<tr><td colSpan={7} style={{...sh.td,textAlign:"center",color:C.muted,padding:32}}>No records found</td></tr>
+                :filteredSuppliers.sort((a,b)=>b.outstanding-a.outstanding).map(p=>(
+                  <React.Fragment key={p.id}>
+                    <tr onClick={()=>setExpandedId(expandedId===p.id?null:p.id)} style={{cursor:"pointer",background:expandedId===p.id?"#fdf0e8":C.surface}}>
+                      <td style={{...sh.td,fontWeight:700}}>{p.name}{p.phone&&<div style={{fontSize:11,color:C.muted,fontWeight:400}}>📞 {p.phone}</div>}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace"}}>{fmt(p.purchased)}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.green}}>{fmt(p.paid)}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:p.outstanding>0?C.red:C.green}}>{fmt(p.outstanding)}</td>
+                      <td style={sh.td}><StatusChip sb={p.statusBadge}/></td>
+                      <td style={sh.td}>{p.outstanding>0&&p.daysOut>0?<AgeChip days={p.daysOut}/>:<span style={{color:C.muted,fontSize:12}}>—</span>}</td>
+                      <td style={{...sh.td,color:C.muted,fontSize:12}}>{p.grnBreakdown.length} GRNs {expandedId===p.id?"▲":"▼"}</td>
+                    </tr>
+                    {expandedId===p.id&&(
+                      <tr><td colSpan={7} style={{padding:0,background:"#fdf8f4"}}>
+                        <div style={{padding:"12px 20px"}}>
+                          <div style={{fontSize:11,fontWeight:800,color:C.accent,textTransform:"uppercase",marginBottom:8}}>GRN Breakdown — {p.name}</div>
+                          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                            <thead><tr style={{background:"#f5ede4"}}>
+                              <th style={{...sh.th,fontSize:11}}>GRN</th><th style={{...sh.th,fontSize:11}}>Date</th><th style={{...sh.th,fontSize:11}}>Type</th><th style={{...sh.th,fontSize:11,textAlign:"right"}}>Value</th><th style={{...sh.th,fontSize:11,textAlign:"right"}}>Paid</th><th style={{...sh.th,fontSize:11,textAlign:"right"}}>Outstanding</th><th style={{...sh.th,fontSize:11}}>Ageing</th>
+                            </tr></thead>
+                            <tbody>
+                              {p.grnBreakdown.map(g=>(
+                                <tr key={g.id} style={{borderBottom:`1px solid ${C.border}`}}>
+                                  <td style={{padding:"6px 12px",fontFamily:"monospace",fontWeight:700,color:C.accent}}>{g.id}</td>
+                                  <td style={{padding:"6px 12px",color:C.muted}}>{g.date}</td>
+                                  <td style={{padding:"6px 12px"}}>{g.coffeeType}</td>
+                                  <td style={{padding:"6px 12px",textAlign:"right",fontFamily:"monospace"}}>{g.ratePending?<span style={{color:"#92400e",fontSize:11}}>Rate Pending</span>:fmt(g.grnPurchased)}</td>
+                                  <td style={{padding:"6px 12px",textAlign:"right",fontFamily:"monospace",color:C.green}}>{fmt(g.grnPaid)}</td>
+                                  <td style={{padding:"6px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:700,color:g.grnOutstanding>0?C.red:C.green}}>{fmt(g.grnOutstanding)}</td>
+                                  <td style={{padding:"6px 12px"}}>{g.grnOutstanding>0?<AgeChip days={g.days}/>:<span style={{color:C.green,fontSize:11}}>✓ Paid</span>}</td>
+                                </tr>
+                              ))}
+                              {p.grnBreakdown.length===0&&<tr><td colSpan={7} style={{padding:"12px",color:C.muted,textAlign:"center"}}>No GRNs</td></tr>}
+                            </tbody>
+                          </table>
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+              <tfoot><tr style={{background:"#f5ede4"}}>
+                <td style={{padding:"10px 12px",fontWeight:800}}>TOTAL</td>
+                <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800}}>{fmt(filteredSuppliers.reduce((s,p)=>s+p.purchased,0))}</td>
+                <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmt(filteredSuppliers.reduce((s,p)=>s+p.paid,0))}</td>
+                <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(filteredSuppliers.reduce((s,p)=>s+p.outstanding,0))}</td>
+                <td colSpan={3}></td>
+              </tr></tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+      {/* Buyer Table */}
+      {activeTab==="buyers"&&(
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",minWidth:700}}>
+              <thead><tr style={{background:"#f5ede4"}}>
+                <th style={sh.th}>Buyer</th><th style={{...sh.th,textAlign:"right"}}>Total Sales</th><th style={{...sh.th,textAlign:"right"}}>Received</th><th style={{...sh.th,textAlign:"right"}}>Outstanding</th><th style={sh.th}>Status</th><th style={sh.th}>Ageing</th><th style={sh.th}>Sales</th>
+              </tr></thead>
+              <tbody>
+                {filteredBuyers.length===0?<tr><td colSpan={7} style={{...sh.td,textAlign:"center",color:C.muted,padding:32}}>No records found</td></tr>
+                :filteredBuyers.sort((a,b)=>b.outstanding-a.outstanding).map(p=>(
+                  <React.Fragment key={p.id}>
+                    <tr onClick={()=>setExpandedId(expandedId===p.id?null:p.id)} style={{cursor:"pointer",background:expandedId===p.id?"#eff6ff":C.surface}}>
+                      <td style={{...sh.td,fontWeight:700}}>{p.name}{p.phone&&<div style={{fontSize:11,color:C.muted,fontWeight:400}}>📞 {p.phone}</div>}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace"}}>{fmt(p.sold)}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.green}}>{fmt(p.received)}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:p.outstanding>0?C.blue:C.green}}>{fmt(p.outstanding)}</td>
+                      <td style={sh.td}><StatusChip sb={p.statusBadge}/></td>
+                      <td style={sh.td}>{p.outstanding>0&&p.daysOut>0?<AgeChip days={p.daysOut}/>:<span style={{color:C.muted,fontSize:12}}>—</span>}</td>
+                      <td style={{...sh.td,color:C.muted,fontSize:12}}>{p.saleBreakdown.length} sales {expandedId===p.id?"▲":"▼"}</td>
+                    </tr>
+                    {expandedId===p.id&&(
+                      <tr><td colSpan={7} style={{padding:0,background:"#eff6ff22"}}>
+                        <div style={{padding:"12px 20px"}}>
+                          <div style={{fontSize:11,fontWeight:800,color:C.blue,textTransform:"uppercase",marginBottom:8}}>Sale Breakdown — {p.name}</div>
+                          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                            <thead><tr style={{background:"#eff6ff"}}>
+                              <th style={{...sh.th,fontSize:11}}>Sale ID</th><th style={{...sh.th,fontSize:11}}>Date</th><th style={{...sh.th,fontSize:11,textAlign:"right"}}>Amount</th><th style={{...sh.th,fontSize:11,textAlign:"right"}}>Received</th><th style={{...sh.th,fontSize:11,textAlign:"right"}}>Outstanding</th><th style={{...sh.th,fontSize:11}}>Ageing</th>
+                            </tr></thead>
+                            <tbody>
+                              {p.saleBreakdown.map(s=>(
+                                <tr key={s.id} style={{borderBottom:`1px solid ${C.border}`}}>
+                                  <td style={{padding:"6px 12px",fontFamily:"monospace",fontWeight:700,color:C.blue}}>{s.id}</td>
+                                  <td style={{padding:"6px 12px",color:C.muted}}>{s.date}</td>
+                                  <td style={{padding:"6px 12px",textAlign:"right",fontFamily:"monospace"}}>{fmt(s.totalAmount)}</td>
+                                  <td style={{padding:"6px 12px",textAlign:"right",fontFamily:"monospace",color:C.green}}>{fmt(s.salePaid)}</td>
+                                  <td style={{padding:"6px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:700,color:s.saleOutstanding>0?C.blue:C.green}}>{fmt(s.saleOutstanding)}</td>
+                                  <td style={{padding:"6px 12px"}}>{s.saleOutstanding>0?<AgeChip days={s.days}/>:<span style={{color:C.green,fontSize:11}}>✓ Paid</span>}</td>
+                                </tr>
+                              ))}
+                              {p.saleBreakdown.length===0&&<tr><td colSpan={6} style={{padding:"12px",color:C.muted,textAlign:"center"}}>No sales</td></tr>}
+                            </tbody>
+                          </table>
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+              <tfoot><tr style={{background:"#f5ede4"}}>
+                <td style={{padding:"10px 12px",fontWeight:800}}>TOTAL</td>
+                <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800}}>{fmt(filteredBuyers.reduce((s,p)=>s+p.sold,0))}</td>
+                <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmt(filteredBuyers.reduce((s,p)=>s+p.received,0))}</td>
+                <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(filteredBuyers.reduce((s,p)=>s+p.outstanding,0))}</td>
+                <td colSpan={3}></td>
+              </tr></tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── DASHBOARD ─────────────────────────────────────────────────────
-function Dashboard({ state }) {
+// ── HELPERS: AGEING ──────────────────────────────────────────────
+const daysDiff = (dateStr) => {
+  if (!dateStr) return 0;
+  const d = new Date(dateStr);
+  const now = new Date();
+  return Math.floor((now - d) / (1000 * 60 * 60 * 24));
+};
+const ageingBucket = (days) => {
+  if (days <= 30)  return { label:"0–30 days",  color:"#15803d", bg:"#dcfce7" };
+  if (days <= 60)  return { label:"31–60 days", color:"#92400e", bg:"#fef3c7" };
+  if (days <= 90)  return { label:"61–90 days", color:"#c2410c", bg:"#ffedd5" };
+  return             { label:"90+ days",   color:"#b91c1c", bg:"#fee2e2" };
+};
+const statusBadge = (outstanding, purchased) => {
+  if (outstanding <= 0)                           return { label:"Paid",    color:"#15803d", bg:"#dcfce7" };
+  if (outstanding < purchased && outstanding > 0) return { label:"Partial", color:"#92400e", bg:"#fef3c7" };
+  return                                                 { label:"Unpaid",  color:"#b91c1c", bg:"#fee2e2" };
+};
+
+function Dashboard({ state, setTab }) {
   const cash=state.accounts["cash"]?.balance||0;
   const bankAccounts=Object.values(state.accounts).filter(a=>a.group==="Cash & Bank"&&a.id!=="cash");
   const totalBank=bankAccounts.reduce((s,a)=>s+a.balance,0);
   const parties=Object.values(state.parties);
-  const receivable=parties.reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
-  const payable=parties.reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b<0?s+Math.abs(b):s;},0);
   const todayVouchers=state.vouchers.filter(v=>v.date===today());
   const stockItems=Object.entries(state.stock||{}).filter(([,q])=>q>0);
   const incomeAccs=Object.values(state.accounts).filter(a=>a.type==="income");
@@ -1415,31 +1666,100 @@ function Dashboard({ state }) {
   const totalExpense=expenseAccs.reduce((s,a)=>s+a.balance,0);
   const netProfit=totalIncome-totalExpense;
 
+  // Pending alerts
+  const ratePending   = state.grns.filter(g=>g.ratePending&&(g.grnType==="purchase"||g.grnType==="both")).length;
+  const dryingPending = state.grns.filter(g=>(g.hasDrying===true||g.hasDrying==="true")&&!g.dryKg).length;
+  const qcPending     = state.grns.filter(g=>needsQualityForGRN(g)&&!g.qualityReport).length;
+
+  // Supplier payables
+  const topPayables = useMemo(()=>
+    Object.values(state.parties).filter(p=>p.partyType==="supplier").map(p=>{
+      const bal=state.accounts[p.id]?.balance||0;
+      const outstanding = bal>0?bal:0;
+      const oldestGRN = state.grns.filter(g=>g.partyId===p.id&&!g.ratePending&&parseFloat(g.purchaseValue||0)>0).sort((a,b)=>a.date.localeCompare(b.date))[0];
+      return {...p, outstanding, days:oldestGRN?daysDiff(oldestGRN.date):0};
+    }).filter(p=>p.outstanding>0).sort((a,b)=>b.outstanding-a.outstanding).slice(0,5)
+  ,[state.parties,state.accounts,state.grns]);
+
+  // Buyer receivables
+  const topReceivables = useMemo(()=>
+    Object.values(state.parties).filter(p=>p.partyType==="customer").map(p=>{
+      const bal=state.accounts[p.id]?.balance||0;
+      const outstanding = bal>0?bal:0;
+      const oldestSale=(state.sales||[]).filter(s=>s.buyerId===p.id).sort((a,b)=>a.date.localeCompare(b.date))[0];
+      return {...p, outstanding, days:oldestSale&&outstanding>0?daysDiff(oldestSale.date):0};
+    }).filter(p=>p.outstanding>0).sort((a,b)=>b.outstanding-a.outstanding).slice(0,5)
+  ,[state.parties,state.accounts,state.sales]);
+
+  // Monthly trend
+  const monthlyTrend = useMemo(()=>{
+    const months=[];
+    const now=new Date();
+    for(let i=5;i>=0;i--){
+      const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+      const key=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+      const label=d.toLocaleString("en-IN",{month:"short",year:"2-digit"});
+      const purchased=state.vouchers.filter(v=>v.voucherType==="PuV"&&(v.date||"").startsWith(key)).reduce((s,v)=>s+v.entries.filter(e=>e.accountId==="purchases").reduce((t,e)=>t+parseFloat(e.dr||0),0),0);
+      const sales=state.vouchers.filter(v=>v.voucherType==="SV"&&(v.date||"").startsWith(key)).reduce((s,v)=>s+v.entries.filter(e=>e.accountId==="sales").reduce((t,e)=>t+parseFloat(e.cr||0),0),0);
+      months.push({key,label,purchased,sales});
+    }
+    return months;
+  },[state.vouchers]);
+  const maxVal=Math.max(...monthlyTrend.map(m=>Math.max(m.purchased,m.sales)),1);
+  const thisMonth=new Date().toISOString().slice(0,7);
+  const grnsThisMonth=state.grns.filter(g=>(g.date||"").startsWith(thisMonth)).length;
+  const salesThisMonth=(state.sales||[]).filter(s=>(s.date||"").startsWith(thisMonth)).length;
+
+  const totalPayable=Object.values(state.parties).filter(p=>p.partyType==="supplier").reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
+  const totalReceivable=Object.values(state.parties).filter(p=>p.partyType==="customer").reduce((s,p)=>{const b=state.accounts[p.id]?.balance||0;return b>0?s+b:s;},0);
+
   const Stat=({icon,label,value,color,sub})=>(
-    <div style={{...sh.card,flex:1,minWidth:150}}>
-      <div style={{fontSize:22,marginBottom:4}}>{icon}</div>
+    <div style={{...sh.card,flex:1,minWidth:140}}>
+      <div style={{fontSize:20,marginBottom:4}}>{icon}</div>
       <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{label}</div>
-      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:color||C.text,marginTop:4}}>{value}</div>
+      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:color||C.text,marginTop:4}}>{value}</div>
       {sub&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>{sub}</div>}
     </div>
   );
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:20}}>
-      <div>
-        <h2 style={{margin:0,color:C.text,fontSize:24,fontWeight:800}}>☕ Coffee Vel International</h2>
-        <p style={{margin:"3px 0 0",color:C.muted,fontSize:13}}>Pattiveeranpatti · Dashboard · {today()}</p>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:24,fontWeight:800}}>☕ Coffee Vel International</h2>
+          <p style={{margin:"3px 0 0",color:C.muted,fontSize:13}}>Pattiveeranpatti · {today()}</p>
+        </div>
+        <div style={{fontSize:12,color:C.muted}}>This month: <strong style={{color:C.text}}>{grnsThisMonth} GRNs</strong> · <strong style={{color:C.text}}>{salesThisMonth} Sales</strong></div>
       </div>
+      {/* Alerts */}
+      {(ratePending>0||dryingPending>0||qcPending>0)&&(
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          {ratePending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:`4px solid ${C.red}`,padding:"12px 16px"}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.red,textTransform:"uppercase"}}>⚠️ Rate Pending</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:C.red}}>{ratePending}</div>
+            <div style={{fontSize:11,color:C.muted}}>GRNs awaiting rate confirmation</div>
+          </div>}
+          {dryingPending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:"4px solid #f97316",padding:"12px 16px"}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#c2410c",textTransform:"uppercase"}}>⏳ Drying Pending</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:"#c2410c"}}>{dryingPending}</div>
+            <div style={{fontSize:11,color:C.muted}}>GRNs awaiting dry weight</div>
+          </div>}
+          {qcPending>0&&<div onClick={()=>setTab&&setTab("grn")} style={{...sh.card,flex:1,minWidth:160,cursor:"pointer",borderLeft:"4px solid #92400e",padding:"12px 16px"}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#92400e",textTransform:"uppercase"}}>🔬 QC Pending</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:"#92400e"}}>{qcPending}</div>
+            <div style={{fontSize:11,color:C.muted}}>GRNs awaiting quality report</div>
+          </div>}
+        </div>
+      )}
       <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
-        <Stat icon="💵" label="Cash in Hand"  value={fmt(cash)}       color={cash>=0?C.green:C.red}/>
-        <Stat icon="🏦" label="Bank Balance"  value={fmt(totalBank)}  color={totalBank>=0?C.green:C.red} sub={bankAccounts.length>1?`${bankAccounts.length} accounts`:bankAccounts[0]?.name||"No bank added"}/>
-        <Stat icon="📥" label="Receivable"    value={fmt(receivable)} color={C.blue} sub="Customers owe us"/>
-        <Stat icon="📤" label="Payable"       value={fmt(payable)}    color={C.red}  sub="We owe suppliers"/>
+        <Stat icon="💵" label="Cash in Hand"  value={fmt(cash)}            color={cash>=0?C.green:C.red}/>
+        <Stat icon="🏦" label="Bank Balance"  value={fmt(totalBank)}       color={totalBank>=0?C.green:C.red} sub={bankAccounts.length>1?`${bankAccounts.length} accounts`:bankAccounts[0]?.name||"No bank added"}/>
+        <Stat icon="📤" label="Payable"       value={fmt(totalPayable)}    color={C.red}  sub="We owe suppliers"/>
+        <Stat icon="📥" label="Receivable"    value={fmt(totalReceivable)} color={C.blue} sub="Customers owe us"/>
         <Stat icon={netProfit>=0?"✅":"⚠️"} label={netProfit>=0?"Net Profit":"Net Loss"} value={fmt(Math.abs(netProfit))} color={netProfit>=0?C.green:C.red}/>
         <Stat icon="📓" label="Vouchers"      value={state.vouchers.length} sub={`${todayVouchers.length} today`}/>
-        <Stat icon="📋" label="Purchase GRNs" value={state.grns.length} sub={state.grns.filter(g=>!g.qualityReport).length+" QC pending"}/>
       </div>
-      {bankAccounts.length>1&&(
+      {bankAccounts.length>0&&(
         <div style={sh.card}>
           <div style={{fontWeight:800,marginBottom:10}}>🏦 Bank Accounts</div>
           <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
@@ -1453,6 +1773,60 @@ function Dashboard({ state }) {
           </div>
         </div>
       )}
+      {/* Monthly Trend Chart */}
+      <div style={sh.card}>
+        <div style={{fontWeight:800,marginBottom:14}}>📈 Monthly Trend (Last 6 Months)</div>
+        <div style={{display:"flex",gap:4,alignItems:"flex-end",height:120}}>
+          {monthlyTrend.map(m=>(
+            <div key={m.key} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+              <div style={{width:"100%",display:"flex",gap:2,alignItems:"flex-end",height:90}}>
+                <div title={`Purchases: ${fmt(m.purchased)}`} style={{flex:1,background:C.red+"88",borderRadius:"3px 3px 0 0",height:`${Math.max(2,(m.purchased/maxVal)*90)}px`}}/>
+                <div title={`Sales: ${fmt(m.sales)}`}         style={{flex:1,background:C.green+"88",borderRadius:"3px 3px 0 0",height:`${Math.max(2,(m.sales/maxVal)*90)}px`}}/>
+              </div>
+              <div style={{fontSize:10,color:C.muted,textAlign:"center",whiteSpace:"nowrap"}}>{m.label}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:16,marginTop:8}}>
+          <span style={{fontSize:11,color:C.muted,display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,background:C.red+"88",borderRadius:2,display:"inline-block"}}></span>Purchases</span>
+          <span style={{fontSize:11,color:C.muted,display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,background:C.green+"88",borderRadius:2,display:"inline-block"}}></span>Sales</span>
+        </div>
+      </div>
+      {/* Top Payables & Receivables */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{background:"#fee2e2",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.red,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>📤 Top Payables</span>
+            {setTab&&<button onClick={()=>setTab("outstanding")} style={{background:"none",border:`1px solid ${C.red}`,color:C.red,borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>}
+          </div>
+          {topPayables.length===0?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No pending payables</div>
+          :topPayables.map(p=>(
+            <div key={p.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:13}}>{p.name}</div>
+                {p.days>0&&<span style={{fontSize:10,...ageingBucket(p.days),padding:"1px 6px",borderRadius:8,fontWeight:700}}>{ageingBucket(p.days).label}</span>}
+              </div>
+              <div style={{fontFamily:"monospace",fontWeight:800,color:C.red,fontSize:14}}>{fmt(p.outstanding)}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{background:"#eff6ff",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.blue,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>📥 Top Receivables</span>
+            {setTab&&<button onClick={()=>setTab("outstanding")} style={{background:"none",border:`1px solid ${C.blue}`,color:C.blue,borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>View All</button>}
+          </div>
+          {topReceivables.length===0?<div style={{padding:20,textAlign:"center",color:C.muted,fontSize:13}}>No pending receivables</div>
+          :topReceivables.map(p=>(
+            <div key={p.id} style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:13}}>{p.name}</div>
+                {p.days>0&&<span style={{fontSize:10,...ageingBucket(p.days),padding:"1px 6px",borderRadius:8,fontWeight:700}}>{ageingBucket(p.days).label}</span>}
+              </div>
+              <div style={{fontFamily:"monospace",fontWeight:800,color:C.blue,fontSize:14}}>{fmt(p.outstanding)}</div>
+            </div>
+          ))}
+        </div>
+      </div>
       {stockItems.length>0&&(
         <div style={sh.card}>
           <div style={{fontWeight:800,marginBottom:10}}>☕ Stock on Hand</div>
@@ -3053,9 +3427,9 @@ const HULL_GRADE_LABELS = {
 };
 // Stock item names for grades
 const HULL_GRADE_STOCK = {
-  gradeAAA:"Grade AA", gradeAA:"Grade AA", gradeA:"Grade A",
-  gradeB:"Grade B",    gradeC:"Grade C",   gradePB:"Grade PB",
-  gradeBBB:"Grade BBB",gradeBits:"Bits",   gradeIDB:"Grade C",
+  gradeAAA:"Grade AAA", gradeAA:"Grade AA", gradeA:"Grade A",
+  gradeB:"Grade B",     gradeC:"Grade C",   gradePB:"Grade PB",
+  gradeBBB:"Grade BBB", gradeBits:"Bits",   gradeIDB:"Grade IDB",
 };
 
 function HullingModule({ state, dispatch, role }) {
@@ -5038,6 +5412,7 @@ const NAV=[
   {id:"ledger",    label:"Ledger",       icon:"📒",   branchHidden:true},
   {id:"pl",        label:"Profit & Loss",icon:"📈", adminOnly:true},
   {id:"trial",     label:"Trial Balance",icon:"⚖️",   branchHidden:true},
+  {id:"outstanding",label:"Outstanding", icon:"📊",   branchHidden:true},
   {id:"stock",     label:"Stock",        icon:"☕"},
   {id:"parties",   label:"Parties",      icon:"👥"},
   {id:"accounts",  label:"Accounts",     icon:"🗂",   branchHidden:true},
@@ -5129,13 +5504,15 @@ export default function App() {
       // Husk is waste — not in stock
       // Grades come IN
       const grades = {
-        "Grade AA":  (parseFloat(h.gradeAAA||0)+parseFloat(h.gradeAA||0)), // AAA+AA both go to Grade AA stock
+        "Grade AAA": parseFloat(h.gradeAAA||0),
+        "Grade AA":  parseFloat(h.gradeAA||0),
         "Grade A":   parseFloat(h.gradeA||0),
         "Grade B":   parseFloat(h.gradeB||0),
-        "Grade C":   (parseFloat(h.gradeC||0)+parseFloat(h.gradeIDB||0)), // C+IDB
+        "Grade C":   parseFloat(h.gradeC||0),
         "Grade PB":  parseFloat(h.gradePB||0),
         "Grade BBB": parseFloat(h.gradeBBB||0),
         "Bits":      parseFloat(h.gradeBits||0),
+        "Grade IDB": parseFloat(h.gradeIDB||0),
       };
       Object.entries(grades).forEach(([grade,qty])=>{
         if (qty>0) s[grade] = (s[grade]||0) + qty;
@@ -5320,6 +5697,19 @@ export default function App() {
             await db.addVoucher({ id:vId, voucherType:"RV", date:action.data.date, narration:`Storage charges for ${id}`, reference:id, entries, items:[] });
             await db.applyEntries(accounts, entries, 1);
           }
+          break;
+        }
+        case "ADD_USER": {
+          const d = action.data;
+          // cv_users.id is UUID — must use gen_random_uuid() via RPC or insert without id (let DB default)
+          await sb("POST","cv_users",{body:{
+            username:  d.username,
+            password:  d.password,
+            name:      d.name,
+            role:      d.role,
+            location:  d.role==="branch" ? "yercaud" : "hq",
+            branchName: d.branchName || (d.role==="branch" ? "Yercaud" : "Head Office"),
+          }});
           break;
         }
         case "EDIT_USER":   await db.editUser(action.id, action.data); break;
@@ -6020,7 +6410,7 @@ export default function App() {
             <button onClick={()=>setError("")} style={{background:"none",border:"none",cursor:"pointer",color:C.red,fontSize:18}}>×</button>
           </div>
         )}
-        {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch}/>}
+        {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch} setTab={setTab}/>}
         {tab==="grn"       && <GRNModule      state={{...state, grns: isBranch ? state.grns.filter(g=>g.location===userLoc||!g.location) : state.grns}} dispatch={dispatch} role={role} currentUser={currentUser}/>}
         {tab==="yercaud"   && <YercaudModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="loadman"   && <LoadmanModule  state={state} dispatch={dispatch} role={role}/>}
@@ -6035,6 +6425,7 @@ export default function App() {
         {tab==="ledger"    && <LedgerView     state={state}/>}
         {tab==="pl"        && <ProfitLoss     state={state}/>}
         {tab==="trial"     && <TrialBalance   state={state}/>}
+        {tab==="outstanding"&& <OutstandingReport state={state}/>}
         {tab==="stock"     && <StockView      state={state} dispatch={dispatch}/>}
         {tab==="parties"   && <Parties        state={state} dispatch={dispatch}/>}
         {tab==="accounts"  && <AccountsMaster state={state} dispatch={dispatch}/>}
