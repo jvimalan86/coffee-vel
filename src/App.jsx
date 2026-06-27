@@ -258,6 +258,10 @@ const tbDr = a => ["asset","expense"].includes(a.type) ? (a.balance>0?a.balance:
 const tbCr = a => ["liability","income","capital"].includes(a.type) ? (a.balance>0?a.balance:0) : (a.balance<0?Math.abs(a.balance):0);
 const balLabel = a => tbDr(a)>0 ? "Dr" : "Cr";
 const balColor = a => tbDr(a)>0 ? C.green : C.red;
+const getBalLabel = (acc, bal) => {
+  if (!acc) return bal>=0?"Dr":"Cr";
+  return ["asset","expense"].includes(acc.type) ? (bal>=0?"Dr":"Cr") : (bal>=0?"Cr":"Dr");
+};
 
 // ── SHARED UI ─────────────────────────────────────────────────────
 function Field({ label, children, style }) {
@@ -642,13 +646,36 @@ function Daybook({ state, dispatch, role }) {
 }
 
 // ── LEDGER ────────────────────────────────────────────────────────
-function LedgerView({ state }) {
+function LedgerView({ state, role, currentUser }) {
+  const isBranch  = role === "branch";
+  const branchTag = isBranch ? getBranchTag(currentUser?.branchName) : null;
   const [selectedAcc,setSelectedAcc]=useState("");
   const [fromDate, setFromDate]=useState("");
   const [toDate,   setToDate]  =useState("");
-  const allAccounts=Object.values(state.accounts).sort((a,b)=>a.name.localeCompare(b.name));
-  const account=selectedAcc?state.accounts[selectedAcc]:null;
-  const groups=["Cash & Bank","Debtors","Creditors","Income","Expenses","Capital","Other"];
+  const allAccounts = Object.values(state.accounts).sort((a,b)=>a.name.localeCompare(b.name));
+
+  // Branch: only show their own party accounts (those with tagged entries)
+  const branchTaggedPartyIds = isBranch ? new Set(
+    state.vouchers.flatMap(v=>v.entries||[])
+      .filter(e=>e.narration?.includes(`[${branchTag}]`))
+      .map(e=>e.accountId)
+  ) : null;
+
+  const visibleAccounts = isBranch
+    ? allAccounts.filter(a => {
+        // Always show Yercaud Cash account
+        if (a.id === YERCAUD_CASH_ID) return true;
+        // Show parties that have branch-tagged entries
+        if (a.group === "Creditors" || a.group === "Debtors") return branchTaggedPartyIds.has(a.id);
+        return false;
+      })
+    : allAccounts;
+
+  const groups = isBranch
+    ? ["Cash & Bank","Creditors","Debtors"]
+    : ["Cash & Bank","Debtors","Creditors","Income","Expenses","Capital","Other"];
+
+  const account = selectedAcc ? state.accounts[selectedAcc] : null;
 
   const ledgerEntries=useMemo(()=>{
     if(!selectedAcc) return [];
@@ -660,10 +687,13 @@ function LedgerView({ state }) {
     });
     const acc=state.accounts[selectedAcc];
     const isDebitNormal = ["asset","expense"].includes(acc?.type);
+    const isPartyAccount = acc?.group==="Creditors"||acc?.group==="Debtors";
     let balance=0;
     sorted.forEach(v=>{
       v.entries.forEach(e=>{
         if(e.accountId!==selectedAcc) return;
+        // Branch: for party accounts, only show entries tagged with this branch
+        if(isBranch && isPartyAccount && branchTag && !e.narration?.includes(`[${branchTag}]`)) return;
         const dr=parseFloat(e.dr||0), cr=parseFloat(e.cr||0);
         balance += isDebitNormal ? dr-cr : cr-dr;
         lines.push({
@@ -676,7 +706,7 @@ function LedgerView({ state }) {
       });
     });
     return lines;
-  },[selectedAcc,state.vouchers,state.accounts]);
+  },[selectedAcc,state.vouchers,state.accounts,isBranch,branchTag]);
 
   // Filter entries by date range for display (but closing balance uses all)
   const filteredEntries = useMemo(()=>{
@@ -698,7 +728,7 @@ function LedgerView({ state }) {
           <div style={{padding:"12px 16px",background:C.accent,color:"#fff",fontWeight:800,fontSize:14}}>📂 Accounts</div>
           <div style={{overflowY:"auto",maxHeight:"72vh"}}>
             {groups.map(grp=>{
-              const accs=allAccounts.filter(a=>(a.group||"Other")===grp);
+              const accs=visibleAccounts.filter(a=>(a.group||"Other")===grp);
               if(!accs.length) return null;
               return(
                 <div key={grp}>
@@ -1000,7 +1030,9 @@ function Parties({ state, dispatch }) {
 }
 
 // ── STOCK ITEMS MASTER ────────────────────────────────────────────
-function StockView({ state, dispatch }) {
+function StockView({ state, dispatch, role, currentUser }) {
+  const isBranch  = role === "branch";
+  const userLoc   = (currentUser?.location||"hq").toLowerCase();
   const [newItem,setNewItem]=useState("");
   const [editName,setEditName]=useState(null);
   const [editVal,setEditVal]=useState("");
@@ -1018,14 +1050,19 @@ function StockView({ state, dispatch }) {
   };
 
   const stockBalances = state.stock || {};
-  // Combine: stock items master + coffee types from Masters + grades + actual stock
   const masterItems = [
     ...(state.coffeeTypes?.map(c=>c.name)||[]),
     "Grade AA","Grade A","Grade B","Grade C","Grade PB","Grade BBB","Bits","Coffee Rice (Bulk)",
   ];
+
+  // For branch: build item list from their own GRNs. For HQ: use state.stock keys
+  const branchItems = isBranch
+    ? new Set((state.grns||[]).filter(g=>(g.location||"").toLowerCase()===userLoc).map(g=>(g.outputType||g.coffeeType||"").trim()).filter(Boolean))
+    : new Set();
+
   const allItems = new Set([
     ...masterItems,
-    ...Object.keys(stockBalances).filter(k => (stockBalances[k]||0) > 0),
+    ...(isBranch ? branchItems : Object.keys(stockBalances).filter(k=>(stockBalances[k]||0)>0)),
   ]);
   const itemsWithStock = [...allItems].sort();
 
@@ -1054,13 +1091,17 @@ function StockView({ state, dispatch }) {
                 const grnIds = new Set((state.grns||[]).map(g=>g.id));
                 const acceptedTransferGrnIds = new Set((state.transfers||[]).filter(t=>t.status==="accepted").map(t=>t.grnId).filter(Boolean));
 
-                const grnIn = (state.grns||[]).reduce((s,g)=>{
+                // For branch: only their own GRNs. For HQ: all GRNs (including transferred-in)
+                const relevantGRNs = isBranch
+                  ? (state.grns||[]).filter(g=>(g.location||"").toLowerCase()===userLoc)
+                  : (state.grns||[]);
+
+                const grnIn = relevantGRNs.reduce((s,g)=>{
                   const dryKg  = parseFloat(g.dryKg||0);
                   const hasDry = g.hasDrying===true||g.hasDrying==="true"||g.hasDrying===1;
                   const ct     = (g.coffeeType||"").trim();
-                  const isYercaud = (g.location||"").toLowerCase()==="yercaud";
-                  // Yercaud GRNs only count after accepted transfer
-                  if (isYercaud && !acceptedTransferGrnIds.has(g.id)) return s;
+                  // HQ: Yercaud GRNs only count after accepted transfer
+                  if (!isBranch && (g.location||"").toLowerCase()==="yercaud" && !acceptedTransferGrnIds.has(g.id)) return s;
                   if (hasDry && dryKg>0) {
                     if (hulledGrnIds.has(g.id)) return s;
                     const outputType = g.outputType?.trim()||DRYING_OUT[ct]||ct;
@@ -1072,21 +1113,36 @@ function StockView({ state, dispatch }) {
                     return s;
                   }
                 },0);
-                // Only count PuV items NOT linked to a GRN (standalone purchases)
-                const purIn = state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="PuV" && !(v.reference && grnIds.has(v.reference))).flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
-                const sold = state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="SV").flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
-                // Transferred out = accepted transfers for GRNs matching this item
-                const transferredOut = (state.transfers||[]).filter(t=>t.status==="accepted" && (t.coffeeType===item||DRYING_OUT[t.coffeeType]===item)).reduce((s,t)=>s+parseFloat(t.weightKg||0),0);
-                const totalIn = grnIn + purIn;
+
+                // Standalone purchases (PuV not linked to GRN) — only for HQ
+                const purIn = isBranch ? 0 :
+                  state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="PuV" && !(v.reference && grnIds.has(v.reference))).flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
+
+                // Sales — HQ only (branch doesn't sell)
+                const sold = isBranch ? 0 :
+                  state.vouchers.filter(v=>(v.voucherType||v.voucher_type)==="SV").flatMap(v=>v.items||[]).filter(it=>it.itemName===item).reduce((s,it)=>s+parseFloat(it.qty||0),0);
+
+                // Branch Out = transfers sent. HQ Out = sales only (transfers IN are already in grnIn)
+                const transferredOut = isBranch
+                  ? (state.transfers||[]).filter(t=>t.status==="accepted" && (t.coffeeType===item||DRYING_OUT[t.coffeeType]===item)).reduce((s,t)=>s+parseFloat(t.weightKg||0),0)
+                  : 0;
+
+                const totalIn  = grnIn + purIn;
                 const totalOut = sold + transferredOut;
+
+                // On Hand: for branch = grnIn - transferredOut. For HQ use state.stock
+                const onHand = isBranch ? (totalIn - totalOut) : qty;
                 // Only show rows with actual movements
-                if (totalIn===0 && totalOut===0 && qty===0) return null;
+                if (totalIn===0 && totalOut===0 && onHand===0) return null;
                 return(
                   <tr key={item}>
                     <td style={{...sh.td,fontWeight:700}}>{item}</td>
-                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:qty>0?C.green:qty<0?C.red:C.muted}}>{fmtQ(qty)} kg</td>
+                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:onHand>0?C.green:onHand<0?C.red:C.muted}}>{fmtQ(onHand)} kg</td>
                     <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.blue}}>{fmtQ(totalIn)} kg</td>
-                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red}}>{fmtQ(totalOut)} kg{transferredOut>0&&<span style={{fontSize:10,color:C.muted,marginLeft:4}}>(incl. {fmtQ(transferredOut)}kg transferred)</span>}</td>
+                    <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red}}>
+                      {fmtQ(totalOut)} kg
+                      {transferredOut>0&&<span style={{fontSize:10,color:C.muted,marginLeft:4}}>(incl. {fmtQ(transferredOut)}kg transferred)</span>}
+                    </td>
                   </tr>
                 );
               }).filter(Boolean)}
@@ -4421,6 +4477,15 @@ class YercaudErrorBoundary extends React.Component {
 
 const YERCAUD_CASH_ID = "yercaud_cash";
 
+// Derive a short branch tag from branchName e.g. "Yercaud" → "YRC", "Coorg" → "CRG"
+// Used to tag payments so ledger can be filtered per branch
+const getBranchTag = (branchName) => {
+  if (!branchName) return "BRN";
+  const words = branchName.trim().toUpperCase().split(/\s+/);
+  if (words.length === 1) return words[0].slice(0,3).padEnd(3,"X");
+  return words.map(w=>w[0]).join("").slice(0,4); // e.g. "South Yercaud" → "SY"
+};
+
 function YercaudModule({ state, dispatch, role }) {
   const mobile = typeof window !== "undefined" && window.innerWidth < 768;
   const [showForm,    setShowForm]    = useState(false);
@@ -4526,17 +4591,22 @@ function YercaudModule({ state, dispatch, role }) {
   const totalTransferred = cashTransfers.reduce((s,t)=>s+t.amount,0);
 
   const submitPayment = async () => {
-    if (!pForm.partyId)              { setPErr("Select a supplier"); return; }
+    if (!pForm.partyId)                             { setPErr("Select a supplier"); return; }
     if (!pForm.amount||parseFloat(pForm.amount)<=0) { setPErr("Enter amount"); return; }
-    if (pForm.paymentMode==="cash") {
-      // yercaudBal from accurateAccounts — if account doesn't exist yet, allow (it'll be created)
+    if (isBranch) {
       const bal = state.accounts[YERCAUD_CASH_ID]?.balance || 0;
       if (parseFloat(pForm.amount) > bal && bal > 0) {
         setPErr(`Insufficient Yercaud Cash (₹${fmt(bal)} available)`); return;
       }
     }
     setPErr("");
-    await dispatch({ type:"ADD_YERCAUD_PAYMENT", data:{ ...pForm, amount:parseFloat(pForm.amount) }});
+    const paymentMode = isBranch ? "cash" : pForm.paymentMode;
+    await dispatch({ type:"ADD_YERCAUD_PAYMENT", data:{
+      ...pForm,
+      paymentMode,
+      amount:    parseFloat(pForm.amount),
+      branchTag: getBranchTag(currentUser?.branchName),
+    }});
     setShowForm(false);
     setPForm({date:today(),partyId:"",amount:"",paymentMode:"cash",narration:"",reference:""});
   };
@@ -4740,15 +4810,24 @@ function YercaudModule({ state, dispatch, role }) {
             <Field label="Amount (₹) *">
               <input type="number" value={pForm.amount} onChange={e=>setPForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input}/>
             </Field>
-            <Field label="Payment Mode">
-              <select value={pForm.paymentMode} onChange={e=>setPForm(f=>({...f,paymentMode:e.target.value}))} style={sh.input}>
-                <option value="cash">Yercaud Cash</option>
-                <option value="bank_transfer">Bank Transfer / UPI</option>
-                <option value="cheque">Cheque</option>
-              </select>
-            </Field>
-            <Field label="Reference / UPI / Cheque No.">
-              <input value={pForm.reference} onChange={e=>setPForm(f=>({...f,reference:e.target.value}))} placeholder="Optional" style={sh.input}/>
+            {/* Branch: cash only. HQ: all modes */}
+            {isBranch ? (
+              <Field label="Payment Mode">
+                <input value="Yercaud Cash" readOnly style={{...sh.input,background:"#f0fdf4",color:C.green,fontWeight:700,cursor:"not-allowed"}}/>
+              </Field>
+            ) : (
+              <Field label="Payment Mode">
+                <select value={pForm.paymentMode} onChange={e=>setPForm(f=>({...f,paymentMode:e.target.value}))} style={sh.input}>
+                  <option value="cash">Cash</option>
+                  <option value="bank_transfer">Bank Transfer / UPI</option>
+                  <option value="cheque">Cheque</option>
+                </select>
+              </Field>
+            )}
+            <Field label="Reference No.">
+              <input value={pForm.reference} onChange={e=>setPForm(f=>({...f,reference:e.target.value}))}
+                placeholder={isBranch?"Receipt / bill no. (optional)":"Optional"}
+                style={sh.input}/>
             </Field>
             <Field label="Narration">
               <input value={pForm.narration} onChange={e=>setPForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Advance for wet parchment" style={sh.input}/>
@@ -5894,7 +5973,7 @@ const NAV=[
   {id:"sales",     label:"Sales",        icon:"🏷",   branchHidden:true},
   {id:"storage",   label:"Party Storage",icon:"🏭",   branchHidden:true},
   {id:"daybook",   label:"Day Book",     icon:"📓",   branchHidden:true},
-  {id:"ledger",    label:"Ledger",       icon:"📒",   branchHidden:true},
+  {id:"ledger",    label:"Ledger",       icon:"📒"},
   {id:"pl",        label:"Profit & Loss",icon:"📈", adminOnly:true},
   {id:"trial",     label:"Trial Balance",icon:"⚖️",   branchHidden:true},
   {id:"outstanding",label:"Outstanding", icon:"📊",   branchHidden:true},
@@ -6819,18 +6898,22 @@ export default function App() {
             paymentMode: d.paymentMode||"cash",
             reference:   d.reference||"",
             narration:   d.narration||"",
+            branchTag:   d.branchTag||"YRC",
           });
 
           // Post PV voucher: Dr Supplier (reduces payable), Cr Yercaud Cash
+          // Narration includes branchTag so ledger entries are identifiable per branch
+          const tag = d.branchTag||"YRC";
           const creditAccount = d.paymentMode==="cash" ? YERCAUD_CASH_ID : (d.bankAccountId||"cash");
           const vSeq = await db.getSeq("PV");
           const vId = `PV-${String(vSeq).padStart(4,"0")}`;
           await db.incSeq("PV", vSeq);
+          const vNarration = `[${tag}] ${d.narration||"Branch payment"} - ${id}`;
           const entries = [
-            { accountId: d.partyId,     dr: d.amount, cr: 0,        narration: d.narration||`Yercaud advance - ${id}` },
-            { accountId: creditAccount, dr: 0,        cr: d.amount, narration: d.narration||`Yercaud advance - ${id}` },
+            { accountId: d.partyId,     dr: d.amount, cr: 0,        narration: vNarration },
+            { accountId: creditAccount, dr: 0,        cr: d.amount, narration: vNarration },
           ];
-          await db.addVoucher({ id:vId, voucherType:"PV", date:d.date, narration:`Yercaud payment to ${state.parties[d.partyId]?.name||d.partyId} - ${id}`, reference:id, entries, items:[] });
+          await db.addVoucher({ id:vId, voucherType:"PV", date:d.date, narration:`[${tag}] Payment to ${state.parties[d.partyId]?.name||d.partyId} - ${id}`, reference:id, entries, items:[] });
           break;
         }
 
@@ -6962,11 +7045,11 @@ export default function App() {
         {tab==="sales"     && <SalesModule    state={state} dispatch={dispatch} role={role}/>}
         {tab==="storage"   && <StorageModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="daybook"   && <Daybook        state={state} dispatch={dispatch} role={role}/>}
-        {tab==="ledger"    && <LedgerView     state={state}/>}
+        {tab==="ledger"    && <LedgerView     state={state} role={role} currentUser={currentUser}/>}
         {tab==="pl"        && <ProfitLoss     state={state}/>}
         {tab==="trial"     && <TrialBalance   state={state}/>}
         {tab==="outstanding"&& <OutstandingReport state={state}/>}
-        {tab==="stock"     && <StockView      state={state} dispatch={dispatch}/>}
+        {tab==="stock"     && <StockView      state={state} dispatch={dispatch} role={role} currentUser={currentUser}/>}
         {tab==="parties"   && <Parties        state={state} dispatch={dispatch}/>}
         {tab==="accounts"  && <AccountsMaster state={state} dispatch={dispatch}/>}
         {tab==="masters"   && role==="admin" && <MastersModule state={state} dispatch={dispatch}/>}
