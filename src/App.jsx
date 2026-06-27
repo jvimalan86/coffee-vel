@@ -4402,8 +4402,12 @@ function YercaudModule({ state, dispatch, role }) {
   const submitPayment = async () => {
     if (!pForm.partyId)              { setPErr("Select a supplier"); return; }
     if (!pForm.amount||parseFloat(pForm.amount)<=0) { setPErr("Enter amount"); return; }
-    if (parseFloat(pForm.amount) > yercaudBal && pForm.paymentMode==="cash") {
-      setPErr(`Insufficient Yercaud Cash balance (₹${fmt(yercaudBal)} available)`); return;
+    if (pForm.paymentMode==="cash") {
+      // yercaudBal from accurateAccounts — if account doesn't exist yet, allow (it'll be created)
+      const bal = state.accounts[YERCAUD_CASH_ID]?.balance || 0;
+      if (parseFloat(pForm.amount) > bal && bal > 0) {
+        setPErr(`Insufficient Yercaud Cash (₹${fmt(bal)} available)`); return;
+      }
     }
     setPErr("");
     await dispatch({ type:"ADD_YERCAUD_PAYMENT", data:{ ...pForm, amount:parseFloat(pForm.amount) }});
@@ -5851,10 +5855,17 @@ export default function App() {
     // From GRNs — net weight into stock, handle drying/hulling
     const DRYING_OUTPUT = {"Wet Parchment":"Parchment","Raw Cherry":"Dry Cherry"};
     const hulledGrnSet  = new Set((hullingJobs||[]).map(h=>h.grnId).filter(Boolean));
+    // Yercaud GRNs only enter HQ stock after accepted transfer
+    const acceptedTransferGrnIds = new Set(
+      (transfers||[]).filter(t=>t.status==="accepted").map(t=>t.grnId).filter(Boolean)
+    );
     grns.forEach(g => {
       if (!g.coffeeType || !g.netWeight) return;
       // If fully hulled, skip — hulling job handles stock
       if (hulledGrnSet.has(g.id)) return;
+      // Yercaud GRNs: only count if transfer accepted to HQ
+      const isYercaud = (g.location||"").toLowerCase() === "yercaud";
+      if (isYercaud && !acceptedTransferGrnIds.has(g.id)) return;
       const netWt  = parseFloat(g.netWeight||0);
       const dryKg  = parseFloat(g.dryKg||0);
       const hasDry = g.hasDrying===true || g.hasDrying==="true" || g.hasDrying===1;
@@ -5899,7 +5910,7 @@ export default function App() {
     });
 
     return s;
-  }, [vouchers, grns, hullingJobs, sales]);
+  }, [vouchers, grns, hullingJobs, sales, transfers]);
 
   // ── LOAD ALL DATA ON LOGIN ────────────────────────────────────
   const loadAll = useCallback(async () => {
@@ -6696,6 +6707,8 @@ export default function App() {
         }
         case "ADD_YERCAUD_PAYMENT": {
           const d = action.data;
+          if (!d.partyId) throw new Error("No party selected for payment");
+
           // Get sequence
           let seq;
           try { seq = await db.getYercaudSeq(); }
@@ -6704,8 +6717,7 @@ export default function App() {
           try { await db.incYercaudSeq(seq); } catch(e) {}
 
           // Ensure Yercaud Cash account exists
-          const yercaudExists = accounts[YERCAUD_CASH_ID];
-          if (!yercaudExists) {
+          if (!accounts[YERCAUD_CASH_ID]) {
             await db.addAccount({
               id: YERCAUD_CASH_ID, name:"Yercaud Cash",
               group:"Cash & Bank", type:"asset", balance:0,
@@ -6723,14 +6735,14 @@ export default function App() {
             narration:    d.narration||"",
           });
 
-          // Post payment voucher: Dr Supplier (reduces payable), Cr Yercaud Cash
+          // Post PV voucher: Dr Supplier (reduces payable), Cr Yercaud Cash
           const creditAccount = d.paymentMode==="cash" ? YERCAUD_CASH_ID : (d.bankAccountId||"cash");
           const vSeq = await db.getSeq("PV");
           const vId = `PV-${String(vSeq).padStart(4,"0")}`;
           await db.incSeq("PV", vSeq);
           const entries = [
-            { accountId: d.partyId,       dr: d.amount, cr: 0,        narration: d.narration||`Yercaud advance - ${id}` },
-            { accountId: creditAccount,   dr: 0,        cr: d.amount, narration: d.narration||`Yercaud advance - ${id}` },
+            { accountId: d.partyId,     dr: d.amount, cr: 0,        narration: d.narration||`Yercaud advance - ${id}` },
+            { accountId: creditAccount, dr: 0,        cr: d.amount, narration: d.narration||`Yercaud advance - ${id}` },
           ];
           await db.addVoucher({ id:vId, voucherType:"PV", date:d.date, narration:`Yercaud payment to ${state.parties[d.partyId]?.name||d.partyId} - ${id}`, reference:id, entries, items:[] });
           break;
@@ -6749,6 +6761,7 @@ export default function App() {
       // Refresh all data after every action
       await loadAll();
     } catch(e) {
+      console.error("Dispatch error:", action.type, e);
       setError("Error: " + e.message);
     }
     setSaving(false);
