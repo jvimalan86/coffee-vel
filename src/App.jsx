@@ -4162,11 +4162,13 @@ const YERCAUD_CASH_ID = "yercaud_cash";
 
 function YercaudModule({ state, dispatch, role }) {
   const mobile = typeof window !== "undefined" && window.innerWidth < 768;
-  const [showForm,   setShowForm]   = useState(false);
-  const [showFund,   setShowFund]   = useState(false);
-  const [confirmId,  setConfirmId]  = useState(null);
-  const [filterParty,setFilterParty]= useState("all");
-  const [filterMonth,setFilterMonth]= useState("");
+  const [showForm,    setShowForm]    = useState(false);
+  const [showFund,    setShowFund]    = useState(false);
+  const [showExpense, setShowExpense] = useState(false);
+  const [confirmId,   setConfirmId]   = useState(null);
+  const [activeTab,   setActiveTab]   = useState("payments"); // payments | expenses
+  const [filterParty, setFilterParty] = useState("all");
+  const [filterMonth, setFilterMonth] = useState("");
 
   // Payment form
   const [pForm, setPForm] = useState({
@@ -4176,8 +4178,13 @@ function YercaudModule({ state, dispatch, role }) {
   const [fForm, setFForm] = useState({
     date: today(), fromAccount:"cash", amount:"", narration:"",
   });
+  // Expense form
+  const [eForm, setEForm] = useState({
+    date: today(), expenseAccount:"transport", customAccount:"", amount:"", narration:"",
+  });
   const [pErr, setPErr] = useState("");
   const [fErr, setFErr] = useState("");
+  const [eErr, setEErr] = useState("");
 
   const canPost   = ROLES[role]?.canPost;
   const canDelete = ROLES[role]?.canDelete;
@@ -4191,7 +4198,28 @@ function YercaudModule({ state, dispatch, role }) {
     a.group==="Cash & Bank" && a.id!==YERCAUD_CASH_ID
   );
 
+  // Expense accounts for dropdown
+  const expenseAccounts = Object.values(state.accounts).filter(a=>
+    a.type==="expense" && !a.isParty
+  );
+
   const payments = (state.yercaudPayments||[]);
+
+  // Yercaud expenses = PV vouchers from yercaud_cash that are NOT supplier payments
+  const yercaudExpenses = useMemo(()=>
+    state.vouchers.filter(v=>
+      v.voucherType==="PV" &&
+      v.entries?.some(e=>e.accountId===YERCAUD_CASH_ID && parseFloat(e.cr||0)>0) &&
+      !v.entries?.some(e=>Object.values(state.parties).some(p=>p.id===e.accountId))
+    ).map(v=>({
+      id: v.id,
+      date: v.date,
+      narration: v.narration||"",
+      amount: v.entries.filter(e=>e.accountId===YERCAUD_CASH_ID).reduce((s,e)=>s+parseFloat(e.cr||0),0),
+      expenseAccountId: v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId||"",
+      expenseAccountName: state.accounts[v.entries.find(e=>e.accountId!==YERCAUD_CASH_ID)?.accountId]?.name||"—",
+    }))
+  ,[state.vouchers, state.accounts, state.parties]);
 
   // Filtered payments
   const filtered = payments.filter(p => {
@@ -4201,10 +4229,11 @@ function YercaudModule({ state, dispatch, role }) {
   });
 
   // Summary stats
-  const totalPaid     = filtered.reduce((s,p)=>s+parseFloat(p.amount||0),0);
-  const uniqueParties = new Set(filtered.map(p=>p.partyId)).size;
+  const totalPaid       = filtered.reduce((s,p)=>s+parseFloat(p.amount||0),0);
+  const uniqueParties   = new Set(filtered.map(p=>p.partyId)).size;
+  const totalExpenses   = yercaudExpenses.reduce((s,e)=>s+e.amount,0);
 
-  // Per-party summary (unpaid advances = payments not yet matched to a GRN purchase voucher)
+  // Per-party summary
   const partyAdvances = useMemo(()=>{
     const map = {};
     payments.forEach(p => {
@@ -4239,6 +4268,22 @@ function YercaudModule({ state, dispatch, role }) {
     setFForm({date:today(),fromAccount:"cash",amount:"",narration:""});
   };
 
+  const submitExpense = async () => {
+    const accId = eForm.expenseAccount==="__custom__" ? eForm.customAccount : eForm.expenseAccount;
+    if (!accId)                                    { setEErr("Select an expense account"); return; }
+    if (!eForm.amount||parseFloat(eForm.amount)<=0){ setEErr("Enter amount"); return; }
+    if (parseFloat(eForm.amount) > yercaudBal)     { setEErr(`Insufficient Yercaud Cash (₹${fmt(yercaudBal)} available)`); return; }
+    setEErr("");
+    await dispatch({ type:"ADD_YERCAUD_EXPENSE", data:{
+      date: eForm.date,
+      expenseAccountId: accId,
+      amount: parseFloat(eForm.amount),
+      narration: eForm.narration||"Yercaud expense",
+    }});
+    setShowExpense(false);
+    setEForm({date:today(),expenseAccount:"transport",customAccount:"",amount:"",narration:""});
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:20}}>
 
@@ -4260,41 +4305,48 @@ function YercaudModule({ state, dispatch, role }) {
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
         <div>
-          <h2 style={{margin:0,color:C.text,fontSize:20,fontWeight:800}}>🌿 Yercaud Payments</h2>
-          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Advance payments to suppliers at Yercaud</p>
+          <h2 style={{margin:0,color:C.text,fontSize:20,fontWeight:800}}>🌿 Yercaud Operations</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Supplier payments & expenses at Yercaud</p>
         </div>
         {canPost&&(
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <Btn onClick={()=>setShowFund(true)} variant="outline" size="md">💰 Fund Yercaud Cash</Btn>
-            <Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Payment</Btn>
+            <Btn onClick={()=>{setShowExpense(true);setActiveTab("expenses");}} variant="outline" size="md">🧾 New Expense</Btn>
+            <Btn onClick={()=>{setShowForm(true);setActiveTab("payments");}} variant="success" size="lg">+ New Payment</Btn>
           </div>
         )}
       </div>
 
       {/* Summary cards */}
       <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-        {/* Yercaud Cash Balance */}
-        <div style={{...sh.card,flex:"1 1 200px",borderLeft:`4px solid ${yercaudBal>=0?C.green:C.red}`}}>
+        <div style={{...sh.card,flex:"1 1 180px",borderLeft:`4px solid ${yercaudBal>=0?C.green:C.red}`}}>
           <div style={{fontSize:18,marginBottom:4}}>🌿</div>
           <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Yercaud Cash Balance</div>
           <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:yercaudBal>=0?C.green:C.red,marginTop:4}}>{fmt(yercaudBal)}</div>
-          <div style={{fontSize:11,color:C.muted,marginTop:2}}>Available to pay suppliers</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:2}}>Available to pay / spend</div>
         </div>
-        <div style={{...sh.card,flex:"1 1 140px"}}>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
           <div style={{fontSize:18,marginBottom:4}}>📤</div>
-          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Total Paid (filtered)</div>
-          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.accent,marginTop:4}}>{fmt(totalPaid)}</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Supplier Payments</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:4}}>{fmt(payments.reduce((s,p)=>s+parseFloat(p.amount||0),0))}</div>
         </div>
-        <div style={{...sh.card,flex:"1 1 140px"}}>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
+          <div style={{fontSize:18,marginBottom:4}}>🧾</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Total Expenses</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.red,marginTop:4}}>{fmt(totalExpenses)}</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
           <div style={{fontSize:18,marginBottom:4}}>👥</div>
           <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Suppliers Paid</div>
-          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.accent,marginTop:4}}>{uniqueParties}</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:4}}>{new Set(payments.map(p=>p.partyId)).size}</div>
         </div>
-        <div style={{...sh.card,flex:"1 1 140px"}}>
-          <div style={{fontSize:18,marginBottom:4}}>📋</div>
-          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Total Payments</div>
-          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.accent,marginTop:4}}>{filtered.length}</div>
-        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{display:"flex",gap:0,borderBottom:`2px solid ${C.border}`}}>
+        {[["payments","📤 Supplier Payments"],["expenses","🧾 Expenses"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setActiveTab(id)} style={{padding:"9px 20px",border:"none",borderBottom:`3px solid ${activeTab===id?C.accent:"transparent"}`,background:"transparent",color:activeTab===id?C.accent:C.muted,fontWeight:activeTab===id?700:500,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+        ))}
       </div>
 
       {/* Fund Yercaud Cash form */}
@@ -4404,6 +4456,52 @@ function YercaudModule({ state, dispatch, role }) {
         </div>
       )}
 
+      {/* Expense form */}
+      {showExpense&&activeTab==="expenses"&&(
+        <div style={{...sh.card,border:`2px solid #ef444444`,background:"#fff5f5"}}>
+          <div style={{fontWeight:800,color:C.red,marginBottom:14,fontSize:15}}>🧾 New Yercaud Expense</div>
+          <div style={{fontSize:13,color:C.muted,marginBottom:14,padding:"8px 12px",background:"#fee2e2",borderRadius:6}}>
+            Record cash spent at Yercaud on transport, labour, food, etc. Deducted from Yercaud Cash balance.
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+            <Field label="Date"><input type="date" value={eForm.date} onChange={e=>setEForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
+            <Field label="Expense Type">
+              <select value={eForm.expenseAccount} onChange={e=>setEForm(f=>({...f,expenseAccount:e.target.value}))} style={sh.input}>
+                <option value="transport">Transport / Lorry</option>
+                <option value="salary">Labour / Daily Wages</option>
+                {expenseAccounts.filter(a=>!["transport","salary","purchases","curing_expense","drying_expense","loadman_expense","lorry_expense"].includes(a.id)).map(a=>(
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+                <option value="__custom__">✏ Other (type below)…</option>
+              </select>
+            </Field>
+            {eForm.expenseAccount==="__custom__"&&(
+              <Field label="Account Name / Description">
+                <input value={eForm.customAccount} onChange={e=>setEForm(f=>({...f,customAccount:e.target.value}))} placeholder="e.g. Food & Tea" style={sh.input}/>
+              </Field>
+            )}
+            <Field label="Amount (₹)">
+              <input type="number" value={eForm.amount} onChange={e=>setEForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input} autoFocus/>
+            </Field>
+            <Field label="Narration">
+              <input value={eForm.narration} onChange={e=>setEForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Auto fare to estate" style={sh.input}/>
+            </Field>
+          </div>
+          {parseFloat(eForm.amount||0)>0&&(
+            <div style={{marginTop:12,padding:"10px 14px",background:"#fee2e2",borderRadius:8,fontSize:13}}>
+              <strong>Entry:</strong> Dr <strong>{eForm.expenseAccount==="__custom__"?(eForm.customAccount||"Expense"):state.accounts[eForm.expenseAccount]?.name||eForm.expenseAccount}</strong> → Cr <strong>Yercaud Cash</strong> · <span style={{fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(eForm.amount)}</span>
+            </div>
+          )}
+          {eErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{eErr}</div>}
+          <div style={{display:"flex",gap:10,marginTop:14}}>
+            <Btn onClick={submitExpense} variant="danger" size="lg">✓ Record Expense</Btn>
+            <Btn onClick={()=>{setShowExpense(false);setEErr("");}} variant="ghost">Cancel</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* PAYMENTS TAB */}
+      {activeTab==="payments"&&(<>
       {/* Filters */}
       <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
         <Field label="Party">
@@ -4494,6 +4592,52 @@ function YercaudModule({ state, dispatch, role }) {
               </tr></tfoot>
             </table>
           </div>
+        </div>
+      )}
+      </>)}
+
+      {/* EXPENSES TAB */}
+      {activeTab==="expenses"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {yercaudExpenses.length===0?(
+            <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+              <div style={{fontSize:40,marginBottom:8}}>🧾</div>
+              No expenses recorded yet. Click "🧾 New Expense" to add one.
+            </div>
+          ):(
+            <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+              <div style={{background:"#fff1f2",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.red,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>🧾 Yercaud Expense Register</span>
+                <span style={{fontFamily:"monospace",fontWeight:700,color:C.red}}>{fmt(totalExpenses)}</span>
+              </div>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",minWidth:450}}>
+                  <thead><tr style={{background:"#fff5f5"}}>
+                    <th style={sh.th}>Voucher</th>
+                    <th style={sh.th}>Date</th>
+                    <th style={sh.th}>Expense Type</th>
+                    <th style={sh.th}>Narration</th>
+                    <th style={{...sh.th,textAlign:"right"}}>Amount (₹)</th>
+                  </tr></thead>
+                  <tbody>
+                    {yercaudExpenses.map((e,i)=>(
+                      <tr key={e.id} style={{background:i%2===0?C.surface:C.cream}}>
+                        <td style={{...sh.td,fontFamily:"monospace",fontSize:11,fontWeight:700,color:C.accent}}>{e.id}</td>
+                        <td style={sh.td}>{e.date}</td>
+                        <td style={{...sh.td,fontWeight:600}}>{e.expenseAccountName}</td>
+                        <td style={{...sh.td,fontSize:12,color:C.muted,fontStyle:"italic"}}>{e.narration||"—"}</td>
+                        <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(e.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot><tr style={{background:"#fff1f2"}}>
+                    <td colSpan={4} style={{padding:"10px 16px",fontWeight:800,color:C.red}}>Total Expenses</td>
+                    <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(totalExpenses)}</td>
+                  </tr></tfoot>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -6262,6 +6406,23 @@ export default function App() {
           break;
         }
 
+        case "ADD_YERCAUD_EXPENSE": {
+          const d = action.data;
+          // Ensure Yercaud Cash account exists
+          if (!accounts[YERCAUD_CASH_ID]) {
+            await db.addAccount({ id:YERCAUD_CASH_ID, name:"Yercaud Cash", group:"Cash & Bank", type:"asset", balance:0, isBankAccount:false });
+          }
+          const vSeq = await db.getSeq("PV");
+          const vId = `PV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("PV", vSeq);
+          const entries = [
+            { accountId: d.expenseAccountId, dr: d.amount, cr: 0,        narration: d.narration||"Yercaud expense" },
+            { accountId: YERCAUD_CASH_ID,    dr: 0,        cr: d.amount, narration: d.narration||"Yercaud expense" },
+          ];
+          await db.addVoucher({ id:vId, voucherType:"PV", date:d.date, narration:d.narration||"Yercaud expense", reference:"", entries, items:[] });
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
         case "ADD_YERCAUD_PAYMENT": {
           const d = action.data;
           // Get sequence
