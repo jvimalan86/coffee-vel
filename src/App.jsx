@@ -4552,76 +4552,6 @@ function YercaudModule({ state, dispatch, role }) {
         </div>
       )}
 
-      {/* New Payment form */}
-      {showForm&&(
-        <div style={{...sh.card,border:`2px solid ${C.green}44`}}>
-          <div style={{fontWeight:800,color:C.green,marginBottom:14,fontSize:15}}>🌿 New Yercaud Payment</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
-            <Field label="Date"><input type="date" value={pForm.date} onChange={e=>setPForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
-            <Field label="Supplier *">
-              <select value={pForm.partyId} onChange={e=>setPForm(f=>({...f,partyId:e.target.value}))} style={{...sh.input,borderColor:!pForm.partyId?"#f97316":C.border}}>
-                <option value="">— Select Supplier —</option>
-                {suppliers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </Field>
-            <Field label="Amount (₹) *">
-              <input type="number" value={pForm.amount} onChange={e=>setPForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input}/>
-            </Field>
-            <Field label="Payment Mode">
-              <select value={pForm.paymentMode} onChange={e=>setPForm(f=>({...f,paymentMode:e.target.value}))} style={sh.input}>
-                <option value="cash">Yercaud Cash</option>
-                <option value="bank_transfer">Bank Transfer / UPI</option>
-                <option value="cheque">Cheque</option>
-              </select>
-            </Field>
-            <Field label="Reference / UPI / Cheque No.">
-              <input value={pForm.reference} onChange={e=>setPForm(f=>({...f,reference:e.target.value}))} placeholder="Optional" style={sh.input}/>
-            </Field>
-            <Field label="Narration">
-              <input value={pForm.narration} onChange={e=>setPForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Advance for wet parchment" style={sh.input}/>
-            </Field>
-          </div>
-
-          {/* Preview */}
-          {pForm.partyId&&parseFloat(pForm.amount||0)>0&&(()=>{
-            const party = state.parties[pForm.partyId];
-            const partyAcc = state.accounts[pForm.partyId];
-            const currentBalance = partyAcc?.balance||0;
-            const afterBalance = currentBalance - parseFloat(pForm.amount);
-            return (
-              <div style={{marginTop:14,padding:"12px 16px",background:"#f0fdf4",borderRadius:8,fontSize:13}}>
-                <div style={{fontWeight:700,color:C.green,marginBottom:6}}>Accounting Entry Preview</div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                  <div style={{padding:"8px 12px",background:C.cream,borderRadius:6}}>
-                    <div style={{fontSize:11,color:C.muted}}>Dr (Debit)</div>
-                    <div style={{fontWeight:700}}>{party?.name}</div>
-                    <div style={{fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(pForm.amount)}</div>
-                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>Reduces payable to supplier</div>
-                  </div>
-                  <div style={{padding:"8px 12px",background:C.cream,borderRadius:6}}>
-                    <div style={{fontSize:11,color:C.muted}}>Cr (Credit)</div>
-                    <div style={{fontWeight:700}}>{pForm.paymentMode==="cash"?"Yercaud Cash":"Bank Account"}</div>
-                    <div style={{fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(pForm.amount)}</div>
-                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>Cash paid out</div>
-                  </div>
-                </div>
-                <div style={{marginTop:10,fontSize:12,color:C.muted}}>
-                  {party?.name} balance: <span style={{fontFamily:"monospace",fontWeight:700,color:C.muted}}>{fmt(Math.abs(currentBalance))} {currentBalance>=0?"Dr":"Cr"}</span>
-                  {" → "}<span style={{fontFamily:"monospace",fontWeight:700,color:afterBalance>0?C.red:C.green}}>{fmt(Math.abs(afterBalance))} {afterBalance>=0?"Dr":"Cr"}</span>
-                  {currentBalance===0&&<span style={{color:C.muted}}> (advance — GRN not yet created)</span>}
-                </div>
-              </div>
-            );
-          })()}
-
-          {pErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{pErr}</div>}
-          <div style={{display:"flex",gap:10,marginTop:14}}>
-            <Btn onClick={submitPayment} variant="success" size="lg">✓ Record Payment</Btn>
-            <Btn onClick={()=>{setShowForm(false);setPErr("");}} variant="ghost">Cancel</Btn>
-          </div>
-        </div>
-      )}
-
       {/* Expense form */}
       {showExpense&&activeTab==="expenses"&&(
         <div style={{...sh.card,border:`2px solid #ef444444`,background:"#fff5f5"}}>
@@ -4668,6 +4598,61 @@ function YercaudModule({ state, dispatch, role }) {
 
       {/* PAYMENTS TAB */}
       {activeTab==="payments"&&(<>
+
+      {/* New Payment form — inside payments tab */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.green}44`}}>
+          <div style={{fontWeight:800,color:C.green,marginBottom:14,fontSize:15}}>🌿 New Yercaud Payment</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+            <Field label="Date"><input type="date" value={pForm.date} onChange={e=>setPForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
+            <Field label="Supplier *">
+              <select value={pForm.partyId} onChange={e=>setPForm(f=>({...f,partyId:e.target.value}))} style={{...sh.input,borderColor:!pForm.partyId?"#f97316":C.border}}>
+                <option value="">— Select Supplier —</option>
+                {suppliers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Amount (₹) *">
+              <input type="number" value={pForm.amount} onChange={e=>setPForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input}/>
+            </Field>
+            <Field label="Payment Mode">
+              <select value={pForm.paymentMode} onChange={e=>setPForm(f=>({...f,paymentMode:e.target.value}))} style={sh.input}>
+                <option value="cash">Yercaud Cash</option>
+                <option value="bank_transfer">Bank Transfer / UPI</option>
+                <option value="cheque">Cheque</option>
+              </select>
+            </Field>
+            <Field label="Reference / UPI / Cheque No.">
+              <input value={pForm.reference} onChange={e=>setPForm(f=>({...f,reference:e.target.value}))} placeholder="Optional" style={sh.input}/>
+            </Field>
+            <Field label="Narration">
+              <input value={pForm.narration} onChange={e=>setPForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Advance for wet parchment" style={sh.input}/>
+            </Field>
+          </div>
+          {pForm.partyId && parseFloat(pForm.amount||0)>0 && state.parties[pForm.partyId] && (
+            <div style={{marginTop:14,padding:"12px 16px",background:"#f0fdf4",borderRadius:8,fontSize:13}}>
+              <div style={{fontWeight:700,color:C.green,marginBottom:6}}>Entry Preview</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <div style={{padding:"8px 12px",background:C.cream,borderRadius:6}}>
+                  <div style={{fontSize:11,color:C.muted}}>Dr</div>
+                  <div style={{fontWeight:700}}>{state.parties[pForm.partyId]?.name}</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(pForm.amount)}</div>
+                </div>
+                <div style={{padding:"8px 12px",background:C.cream,borderRadius:6}}>
+                  <div style={{fontSize:11,color:C.muted}}>Cr</div>
+                  <div style={{fontWeight:700}}>{pForm.paymentMode==="cash"?"Yercaud Cash":"Bank Account"}</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(pForm.amount)}</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {pErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{pErr}</div>}
+          <div style={{display:"flex",gap:10,marginTop:14}}>
+            <Btn onClick={submitPayment} variant="success" size="lg">✓ Record Payment</Btn>
+            <Btn onClick={()=>{setShowForm(false);setPErr("");}} variant="ghost">Cancel</Btn>
+          </div>
+        </div>
+      )}
+
       {/* Filters */}
       <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
         <Field label="Party">
