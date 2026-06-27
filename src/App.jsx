@@ -141,11 +141,20 @@ const db = {
   updateTransfer:  (id,d)=> sb("PATCH","cv_stock_transfers",{body:d,q:`?id=eq.${id}`}),
   getTransferSeq:  ()    => sb("GET","cv_transfer_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
   incTransferSeq:  (n)   => sb("PATCH","cv_transfer_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+
+  // HULLING
   getHullingJobs: ()    => sb("GET","cv_hulling_jobs",{q:"?select=*&order=created_at.desc"}),
   addHullingJob:  (d)   => sb("POST","cv_hulling_jobs",{body:d}),
   deleteHullingJob:(id) => sb("DELETE","cv_hulling_jobs",{q:`?id=eq.${id}`}),
   getHullingSeq:  ()    => sb("GET","cv_hulling_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
   incHullingSeq:  (n)   => sb("PATCH","cv_hulling_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+
+  // YERCAUD PAYMENTS
+  getYercaudPayments: () => sb("GET","cv_yercaud_payments",{q:"?select=*&order=created_at.desc"}),
+  addYercaudPayment:  (d) => sb("POST","cv_yercaud_payments",{body:d}),
+  deleteYercaudPayment:(id)=> sb("DELETE","cv_yercaud_payments",{q:`?id=eq.${id}`}),
+  getYercaudSeq:  ()    => sb("GET","cv_yercaud_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incYercaudSeq:  (n)   => sb("PATCH","cv_yercaud_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
 
   // SALES
   getSales:     ()    => sb("GET","cv_sales",{q:"?select=*&order=created_at.desc"}),
@@ -153,6 +162,35 @@ const db = {
   deleteSale:   (id)  => sb("DELETE","cv_sales",{q:`?id=eq.${id}`}),
   getSalesSeq:  ()    => sb("GET","cv_sales_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
   incSalesSeq:  (n)   => sb("PATCH","cv_sales_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+
+  // LOADMAN CHARGES
+  getLoadmanCharges:  ()    => sb("GET","cv_loadman_charges",{q:"?select=*&order=created_at.desc"}),
+  addLoadmanCharge:   (d)   => sb("POST","cv_loadman_charges",{body:d}),
+  deleteLoadmanCharge:(id)  => sb("DELETE","cv_loadman_charges",{q:`?id=eq.${id}`}),
+  getLoadmanSeq:      ()    => sb("GET","cv_loadman_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incLoadmanSeq:      (n)   => sb("PATCH","cv_loadman_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+  getLoadmanRates:    ()    => sb("GET","cv_loadman_rates",{q:"?select=*"}),
+  saveLoadmanRate:    (d)   => sb("POST","cv_loadman_rates",{body:d}),
+  updateLoadmanRate:  (id,d)=> sb("PATCH","cv_loadman_rates",{body:d,q:`?id=eq.${id}`}),
+
+  // LORRY OWNERS
+  getLorryOwners:   ()      => sb("GET","cv_lorry_owners",{q:"?select=*&order=name.asc"}),
+  addLorryOwner:    (d)     => sb("POST","cv_lorry_owners",{body:d}),
+  editLorryOwner:   (id,d)  => sb("PATCH","cv_lorry_owners",{body:d,q:`?id=eq.${id}`}),
+  deleteLorryOwner: (id)    => sb("DELETE","cv_lorry_owners",{q:`?id=eq.${id}`}),
+
+  // LORRY RENTALS
+  getLorryRentals:   ()     => sb("GET","cv_lorry_rentals",{q:"?select=*&order=created_at.desc"}),
+  addLorryRental:    (d)    => sb("POST","cv_lorry_rentals",{body:d}),
+  deleteLorryRental: (id)   => sb("DELETE","cv_lorry_rentals",{q:`?id=eq.${id}`}),
+  getLorrySeq:       ()     => sb("GET","cv_lorry_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incLorrySeq:       (n)    => sb("PATCH","cv_lorry_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+  getLorryPayments:  ()     => sb("GET","cv_lorry_payments",{q:"?select=*&order=created_at.desc"}),
+  addLorryPayment:   (d)    => sb("POST","cv_lorry_payments",{body:d}),
+  deleteLorryPayment:(id)   => sb("DELETE","cv_lorry_payments",{q:`?id=eq.${id}`}),
+  getLorryPaySeq:    ()     => sb("GET","cv_lorry_pay_seq",{q:"?id=eq.1&select=next_no"}).then(r=>r?.[0]?.next_no||1),
+  incLorryPaySeq:    (n)    => sb("PATCH","cv_lorry_pay_seq",{body:{next_no:n+1},q:"?id=eq.1"}),
+
 };
 
 
@@ -602,6 +640,8 @@ function Daybook({ state, dispatch, role }) {
 // ── LEDGER ────────────────────────────────────────────────────────
 function LedgerView({ state }) {
   const [selectedAcc,setSelectedAcc]=useState("");
+  const [fromDate, setFromDate]=useState("");
+  const [toDate,   setToDate]  =useState("");
   const allAccounts=Object.values(state.accounts).sort((a,b)=>a.name.localeCompare(b.name));
   const account=selectedAcc?state.accounts[selectedAcc]:null;
   const groups=["Cash & Bank","Debtors","Creditors","Income","Expenses","Capital","Other"];
@@ -634,8 +674,18 @@ function LedgerView({ state }) {
     return lines;
   },[selectedAcc,state.vouchers,state.accounts]);
 
-  // Use computed closing balance from entries (more accurate than DB balance)
-  const computedBalance = ledgerEntries.length>0 ? ledgerEntries[ledgerEntries.length-1].balance : 0;
+  // Filter entries by date range for display (but closing balance uses all)
+  const filteredEntries = useMemo(()=>{
+    if (!fromDate && !toDate) return ledgerEntries;
+    return ledgerEntries.filter(e=>{
+      if (fromDate && e.date < fromDate) return false;
+      if (toDate   && e.date > toDate)   return false;
+      return true;
+    });
+  },[ledgerEntries, fromDate, toDate]);
+
+  // Use computed closing balance from filtered entries
+  const computedBalance = filteredEntries.length>0 ? filteredEntries[filteredEntries.length-1].balance : 0;
 
   return (
     <div style={{display:"flex",gap:20}}>
@@ -669,11 +719,20 @@ function LedgerView({ state }) {
             <div style={{...sh.card,background:C.accent,color:"#fff"}}>
               <div style={{fontSize:20,fontWeight:800}}>{account.name}</div>
               <div style={{display:"flex",gap:24,marginTop:8,flexWrap:"wrap"}}>
-                {[["Group",account.group],["Type",account.type],["Entries",ledgerEntries.length]].map(([l,v])=>(
+                {[["Group",account.group],["Type",account.type],["Entries",filteredEntries.length]].map(([l,v])=>(
                   <div key={l}><div style={{fontSize:10,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{l}</div><div style={{fontWeight:700,textTransform:"capitalize"}}>{v}</div></div>
                 ))}
                 <div><div style={{fontSize:10,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>Closing Balance</div>
-                <div style={{fontWeight:800,fontFamily:"monospace",fontSize:18}}>{fmt(Math.abs(computedBalance))} {computedBalance>=0?balLabel(account):(balLabel(account)==="Dr"?"Cr":"Dr")}</div></div>
+                <div style={{fontWeight:800,fontFamily:"monospace",fontSize:18}}>{fmt(Math.abs(computedBalance))} {getBalLabel(account, computedBalance)}</div></div>
+              </div>
+            </div>
+            {/* Date filter + Print */}
+            <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
+              <Field label="From Date"><input type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)} style={{...sh.input,width:150}}/></Field>
+              <Field label="To Date"><input type="date" value={toDate} onChange={e=>setToDate(e.target.value)} style={{...sh.input,width:150}}/></Field>
+              {(fromDate||toDate)&&<Btn variant="ghost" size="sm" onClick={()=>{setFromDate("");setToDate("");}}>✕ Clear</Btn>}
+              <div style={{marginLeft:"auto"}}>
+                <Btn variant="outline" size="sm" onClick={()=>printLedger(account, filteredEntries, fromDate, toDate)}>🖨 Print Statement</Btn>
               </div>
             </div>
             <div style={{...sh.card,padding:0,overflow:"hidden"}}>
@@ -683,9 +742,9 @@ function LedgerView({ state }) {
                   <th style={{...sh.th,textAlign:"right"}}>Dr</th><th style={{...sh.th,textAlign:"right"}}>Cr</th><th style={{...sh.th,textAlign:"right"}}>Balance</th>
                 </tr></thead>
                 <tbody>
-                  {ledgerEntries.length===0?(
-                    <tr><td colSpan={6} style={{...sh.td,textAlign:"center",color:C.muted,padding:30}}>No transactions yet</td></tr>
-                  ):ledgerEntries.map((e,i)=>(
+                  {filteredEntries.length===0?(
+                    <tr><td colSpan={6} style={{...sh.td,textAlign:"center",color:C.muted,padding:30}}>No transactions{(fromDate||toDate)?" in selected period":""}</td></tr>
+                  ):filteredEntries.map((e,i)=>(
                     <tr key={i} style={{background:i%2===0?C.surface:C.cream}}>
                       <td style={sh.td}>{e.date}</td>
                       <td style={sh.td}>
@@ -698,16 +757,16 @@ function LedgerView({ state }) {
                       <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.blue,fontWeight:600}}>{e.dr>0?fmt(e.dr):"—"}</td>
                       <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:C.red,fontWeight:600}}>{e.cr>0?fmt(e.cr):"—"}</td>
                       <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:e.balance>=0?C.green:C.red}}>
-                        {fmt(Math.abs(e.balance))} {e.balance>=0?"Dr":"Cr"}
+                        {fmt(Math.abs(e.balance))} {getBalLabel(account, e.balance)}
                       </td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot><tr style={{background:"#f5ede4"}}>
                   <td colSpan={3} style={{padding:"10px 12px",fontWeight:800}}>Closing Balance</td>
-                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(ledgerEntries.reduce((s,e)=>s+e.dr,0))}</td>
-                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(ledgerEntries.reduce((s,e)=>s+e.cr,0))}</td>
-                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:computedBalance>=0?C.green:C.red}}>{fmt(Math.abs(computedBalance))} {computedBalance>=0?balLabel(account):(balLabel(account)==="Dr"?"Cr":"Dr")}</td>
+                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(filteredEntries.reduce((s,e)=>s+e.dr,0))}</td>
+                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(filteredEntries.reduce((s,e)=>s+e.cr,0))}</td>
+                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:computedBalance>=0?C.green:C.red}}>{fmt(Math.abs(computedBalance))} {getBalLabel(account, computedBalance)}</td>
                 </tr></tfoot>
               </table>
             </div>
@@ -1891,6 +1950,237 @@ function QualityForm({ grnId, existing, dispatch, onDone }) {
   );
 }
 
+// ── PRINT GRN SLIP ────────────────────────────────────────────────
+function printGRN(grn, party) {
+  const dryKg   = parseFloat(grn.dryKg||0);
+  const netWt   = parseFloat(grn.netWeight||0);
+  const hasDry  = grn.hasDrying===true||grn.hasDrying==="true"||grn.hasDrying===1;
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>GRN Slip - ${grn.id}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&family=DM+Sans:wght@400;600;700&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'DM Sans',sans-serif; color:#2c1a0e; background:#fff; padding:20px; font-size:13px; }
+  .header { text-align:center; border-bottom:2px solid #6b3f1a; padding-bottom:12px; margin-bottom:16px; }
+  .company { font-family:'Libre Baskerville',serif; font-size:20px; font-weight:700; color:#6b3f1a; }
+  .sub { font-size:11px; color:#8c7560; letter-spacing:1px; text-transform:uppercase; margin-top:2px; }
+  .grn-title { font-size:15px; font-weight:700; color:#6b3f1a; margin-top:6px; }
+  .meta { display:flex; justify-content:space-between; margin-bottom:14px; background:#fdf8f2; border:1px solid #e8ddd0; border-radius:6px; padding:10px 14px; flex-wrap:wrap; gap:8px; }
+  .meta-item { display:flex; flex-direction:column; gap:2px; }
+  .meta-label { font-size:10px; font-weight:700; color:#8c7560; text-transform:uppercase; letter-spacing:0.5px; }
+  .meta-value { font-size:13px; font-weight:600; color:#2c1a0e; }
+  .section { margin-bottom:14px; }
+  .section-title { font-size:11px; font-weight:700; color:#6b3f1a; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #e8ddd0; padding-bottom:4px; margin-bottom:8px; }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:5px 8px; font-size:13px; border-bottom:1px solid #f0e8e0; }
+  td:first-child { color:#8c7560; width:45%; }
+  td:last-child { font-weight:600; }
+  .highlight { background:#f0fdf4; }
+  .highlight td:last-child { color:#15803d; font-weight:800; font-size:14px; }
+  .drying-box { background:#fff7ed; border:1px solid #fed7aa; border-radius:6px; padding:10px 14px; margin-bottom:14px; }
+  .drying-title { font-size:11px; font-weight:700; color:#c2410c; text-transform:uppercase; margin-bottom:6px; }
+  .purchase-box { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:10px 14px; margin-bottom:14px; }
+  .purchase-title { font-size:11px; font-weight:700; color:#15803d; text-transform:uppercase; margin-bottom:6px; }
+  .rate-pending { background:#fef9c3; border:1px solid #fde047; border-radius:6px; padding:8px 14px; color:#92400e; font-weight:600; font-size:12px; }
+  .footer { border-top:1px solid #e8ddd0; margin-top:16px; padding-top:10px; display:flex; justify-content:space-between; font-size:11px; color:#8c7560; }
+  .sig-box { text-align:center; border-top:1px solid #8c7560; padding-top:4px; margin-top:40px; font-size:11px; color:#8c7560; min-width:120px; }
+  .sigs { display:flex; justify-content:space-between; margin-top:24px; }
+  @media print { body { padding:10px; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="company">☕ Coffee Vel International</div>
+  <div class="sub">Pattiveeranpatti · Yercaud · Coffee Processing & Trading</div>
+  <div class="grn-title">Goods Receipt Note</div>
+</div>
+
+<div class="meta">
+  <div class="meta-item"><span class="meta-label">GRN No.</span><span class="meta-value">${grn.id}</span></div>
+  <div class="meta-item"><span class="meta-label">Date</span><span class="meta-value">${grn.date}</span></div>
+  <div class="meta-item"><span class="meta-label">Party</span><span class="meta-value">${party?.name||"—"}</span></div>
+  <div class="meta-item"><span class="meta-label">Truck No.</span><span class="meta-value">${grn.truckNo||"—"}</span></div>
+  <div class="meta-item"><span class="meta-label">Crop Season</span><span class="meta-value">${grn.cropSeason||"—"}</span></div>
+  <div class="meta-item"><span class="meta-label">Type</span><span class="meta-value">${grn.coffeeType}</span></div>
+</div>
+
+<div class="section">
+  <div class="section-title">⚖️ Weight Details</div>
+  <table>
+    <tr><td>Total Bags</td><td>${grn.totalBags||grn.noOfBags||"—"} bags (${grn.bagType||"PP"})</td></tr>
+    ${grn.inputMode==="unit"?`<tr><td>Units / Paka</td><td>${grn.noOfUnits||0} units ${grn.noOfPaka||0} paka = ${grn.totalPaka||0} paka</td></tr>`:""}
+    <tr><td>1st Weight (Loaded)</td><td>${grn.firstWeight||0} kg</td></tr>
+    <tr><td>2nd Weight (Empty)</td><td>${grn.secondWeight||0} kg</td></tr>
+    <tr><td>Gross Weight</td><td>${grn.grossWeight||0} kg</td></tr>
+    <tr><td>Deductions</td><td>${grn.rejectedBags||0} kg</td></tr>
+    <tr class="highlight"><td>Net Weight</td><td>${netWt.toLocaleString("en-IN",{maximumFractionDigits:2})} kg</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">🏭 Storage Details</div>
+  <table>
+    <tr><td>Location</td><td>${grn.location||"—"}</td></tr>
+    <tr><td>Warehouse</td><td>${grn.warehouse||"—"}</td></tr>
+    ${grn.warehouseZone?`<tr><td>Zone</td><td>${grn.warehouseZone}</td></tr>`:""}
+    ${grn.stockNo?`<tr><td>Stock No.</td><td>${grn.stockNo}</td></tr>`:""}
+    <tr><td>GRN Type</td><td style="text-transform:capitalize">${grn.grnType||"purchase"}</td></tr>
+  </table>
+</div>
+
+${hasDry?`
+<div class="drying-box">
+  <div class="drying-title">🌡 Drying Information</div>
+  <table>
+    <tr><td>Method</td><td>${grn.dryingMethod||"Yard"} Drying</td></tr>
+    <tr><td>Output Type</td><td>${grn.outputType||"—"}</td></tr>
+    ${dryKg>0?`<tr><td>Dry Weight</td><td style="font-weight:800;color:#c2410c">${dryKg.toLocaleString("en-IN",{maximumFractionDigits:2})} kg</td></tr>`:"<tr><td>Dry Weight</td><td style='color:#c2410c'>⏳ Pending</td></tr>"}
+    ${dryKg>0&&netWt>0?`<tr><td>Moisture Loss</td><td>${((netWt-dryKg)/netWt*100).toFixed(1)}%</td></tr>`:""}
+    <tr><td>Price Basis</td><td>${grn.priceBasis==="wet"?"On Wet Weight":"On Dry Weight"}</td></tr>
+    ${parseFloat(grn.dryingRate||0)>0?`<tr><td>Drying Rate</td><td>₹${grn.dryingRate}/kg</td></tr>`:""}
+    ${parseFloat(grn.dryingCharge||0)>0?`<tr><td>Drying Charge</td><td>₹${parseFloat(grn.dryingCharge).toLocaleString("en-IN",{minimumFractionDigits:2})}</td></tr>`:""}
+  </table>
+</div>`:""}
+
+${grn.grnType==="purchase"||grn.grnType==="both"?`
+<div class="purchase-box">
+  <div class="purchase-title">💰 Purchase Details</div>
+  ${grn.ratePending?`<div class="rate-pending">⚠️ Rate Pending — to be confirmed</div>`:`
+  <table>
+    <tr><td>Rate</td><td>₹${grn.rate||0} ${grn.rateType==="per_paka"?"per paka":"per kg"}</td></tr>
+    <tr class="highlight"><td>Purchase Value</td><td>₹${parseFloat(grn.purchaseValue||0).toLocaleString("en-IN",{minimumFractionDigits:2})}</td></tr>
+  </table>`}
+</div>`:""}
+
+${grn.remarks||grn.narration?`<div class="section"><div class="section-title">📝 Remarks</div><div style="padding:6px 8px;font-size:13px;color:#8c7560">${grn.remarks||grn.narration}</div></div>`:""}
+
+<div class="sigs">
+  <div class="sig-box">Received By</div>
+  <div class="sig-box">Weigh Bridge Operator</div>
+  <div class="sig-box">Authorised Signatory</div>
+</div>
+
+<div class="footer">
+  <span>Coffee Vel International · Pattiveeranpatti</span>
+  <span>Printed: ${new Date().toLocaleDateString("en-IN")} ${new Date().toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}</span>
+</div>
+</body>
+</html>`;
+
+  const w = window.open("","_blank","width=800,height=900");
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(()=>w.print(), 400);
+}
+
+// ── PRINT SUPPLIER LEDGER ─────────────────────────────────────────
+function printLedger(account, entries, fromDate, toDate) {
+  const totalDr = entries.reduce((s,e)=>s+e.dr,0);
+  const totalCr = entries.reduce((s,e)=>s+e.cr,0);
+  const closing  = entries.length>0 ? entries[entries.length-1].balance : 0;
+  const isDebitNormal = ["asset","expense"].includes(account?.type);
+  const closingLabel = isDebitNormal ? (closing>=0?"Dr":"Cr") : (closing>=0?"Cr":"Dr");
+  const fmtAmt = n => "₹"+Math.abs(Number(n)||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+
+  const VOUCHER_COLORS = {RV:"#22c55e",PV:"#ef4444",CV:"#8b5cf6",JV:"#f59e0b",SV:"#3b82f6",PuV:"#0ea5e9"};
+
+  const rows = entries.map((e,i) => `
+    <tr style="background:${i%2===0?"#fff":"#fdf8f2"}">
+      <td>${e.date}</td>
+      <td><span style="background:${(VOUCHER_COLORS[e.voucherType]||"#888")}18;color:${VOUCHER_COLORS[e.voucherType]||"#888"};padding:1px 6px;border-radius:4px;font-size:11px;font-weight:700">${e.voucherType}</span><br><span style="font-size:10px;color:#8c7560">${e.voucherId}</span></td>
+      <td>${e.narration||"—"}</td>
+      <td style="text-align:right;font-family:monospace;color:#1d4ed8">${e.dr>0?fmtAmt(e.dr):"—"}</td>
+      <td style="text-align:right;font-family:monospace;color:#b91c1c">${e.cr>0?fmtAmt(e.cr):"—"}</td>
+      <td style="text-align:right;font-family:monospace;font-weight:700;color:${e.balance>=0?"#15803d":"#b91c1c"}">${fmtAmt(Math.abs(e.balance))} ${isDebitNormal?(e.balance>=0?"Dr":"Cr"):(e.balance>=0?"Cr":"Dr")}</td>
+    </tr>`).join("");
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Ledger - ${account?.name}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&family=DM+Sans:wght@400;600;700&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'DM Sans',sans-serif; color:#2c1a0e; background:#fff; padding:20px; font-size:12px; }
+  .header { text-align:center; border-bottom:2px solid #6b3f1a; padding-bottom:12px; margin-bottom:16px; }
+  .company { font-family:'Libre Baskerville',serif; font-size:20px; font-weight:700; color:#6b3f1a; }
+  .sub { font-size:11px; color:#8c7560; letter-spacing:1px; text-transform:uppercase; margin-top:2px; }
+  .acc-header { background:#6b3f1a; color:#fff; border-radius:8px; padding:12px 16px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+  .acc-name { font-family:'Libre Baskerville',serif; font-size:17px; font-weight:700; }
+  .acc-meta { font-size:11px; opacity:0.8; margin-top:2px; }
+  .closing { font-family:monospace; font-weight:800; font-size:18px; }
+  table { width:100%; border-collapse:collapse; }
+  th { background:#f5ede4; padding:7px 10px; font-size:11px; color:#8c7560; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; border-bottom:2px solid #e8ddd0; text-align:left; }
+  th.r, td.r { text-align:right; }
+  td { padding:6px 10px; font-size:12px; border-bottom:1px solid #f0e8e0; vertical-align:middle; }
+  tfoot td { background:#f5ede4; font-weight:800; padding:8px 10px; }
+  .footer { border-top:1px solid #e8ddd0; margin-top:16px; padding-top:8px; display:flex; justify-content:space-between; font-size:11px; color:#8c7560; }
+  .period { background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; padding:6px 12px; margin-bottom:12px; font-size:12px; color:#1d4ed8; }
+  @media print { body { padding:8px; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="company">☕ Coffee Vel International</div>
+  <div class="sub">Account Statement · Ledger</div>
+</div>
+
+<div class="acc-header">
+  <div>
+    <div class="acc-name">${account?.name||"Account"}</div>
+    <div class="acc-meta">${account?.group||""} · ${account?.type||""}</div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:11px;opacity:0.8">Closing Balance</div>
+    <div class="closing">${fmtAmt(Math.abs(closing))} ${closingLabel}</div>
+  </div>
+</div>
+
+${fromDate||toDate?`<div class="period">📅 Period: ${fromDate||"Beginning"} → ${toDate||"Today"} · ${entries.length} transactions</div>`:`<div class="period">📅 All Transactions · ${entries.length} entries</div>`}
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:90px">Date</th>
+      <th style="width:80px">Voucher</th>
+      <th>Particulars</th>
+      <th class="r" style="width:110px">Debit (₹)</th>
+      <th class="r" style="width:110px">Credit (₹)</th>
+      <th class="r" style="width:130px">Balance</th>
+    </tr>
+  </thead>
+  <tbody>
+    ${entries.length===0?`<tr><td colspan="6" style="text-align:center;padding:30px;color:#8c7560">No transactions in this period</td></tr>`:rows}
+  </tbody>
+  <tfoot>
+    <tr>
+      <td colspan="3">Total / Closing Balance</td>
+      <td class="r" style="font-family:monospace;color:#1d4ed8">${fmtAmt(totalDr)}</td>
+      <td class="r" style="font-family:monospace;color:#b91c1c">${fmtAmt(totalCr)}</td>
+      <td class="r" style="font-family:monospace;color:${closing>=0?"#15803d":"#b91c1c"}">${fmtAmt(Math.abs(closing))} ${closingLabel}</td>
+    </tr>
+  </tfoot>
+</table>
+
+<div class="footer">
+  <span>Coffee Vel International · Pattiveeranpatti</span>
+  <span>Printed: ${new Date().toLocaleDateString("en-IN")} ${new Date().toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}</span>
+</div>
+</body>
+</html>`;
+
+  const w = window.open("","_blank","width=900,height=700");
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(()=>w.print(), 400);
+}
+
 // ── GRN MODULE ────────────────────────────────────────────────────
 function GRNModule({ state, dispatch, role }) {
   const [showForm,setShowForm]               = useState(false);
@@ -2234,6 +2524,7 @@ function GRNModule({ state, dispatch, role }) {
                   )}
                   {canPost&&<Btn size="sm" variant="outline" onClick={()=>{setEditGRN(g);setShowForm(true);setExpandedId(null);}}>✏ Edit</Btn>}
                   {showQCBtn&&<Btn size="sm" variant="outline" onClick={()=>setShowQuality(g.id)}>{hasQR?"🔬 Edit QC":"🔬 Add QC"}</Btn>}
+                  <Btn size="sm" variant="ghost" onClick={()=>printGRN(g, state.parties[g.partyId])}>🖨 Print</Btn>
                   {canDelete&&<Btn size="sm" variant="danger" onClick={()=>setConfirmDeleteId(g.id)}>🗑 Delete</Btn>}
                 </div>
               </div>
@@ -3492,11 +3783,1254 @@ function StockTransferModule({ state, dispatch, role, currentUser }) {
   );
 }
 
+// ── YERCAUD PAYMENTS MODULE ───────────────────────────────────────
+const YERCAUD_CASH_ID = "yercaud_cash";
+
+function YercaudModule({ state, dispatch, role }) {
+  const mobile = typeof window !== "undefined" && window.innerWidth < 768;
+  const [showForm,   setShowForm]   = useState(false);
+  const [showFund,   setShowFund]   = useState(false);
+  const [confirmId,  setConfirmId]  = useState(null);
+  const [filterParty,setFilterParty]= useState("all");
+  const [filterMonth,setFilterMonth]= useState("");
+
+  // Payment form
+  const [pForm, setPForm] = useState({
+    date: today(), partyId:"", amount:"", paymentMode:"cash", narration:"", reference:"",
+  });
+  // Fund transfer form (top up Yercaud cash)
+  const [fForm, setFForm] = useState({
+    date: today(), fromAccount:"cash", amount:"", narration:"",
+  });
+  const [pErr, setPErr] = useState("");
+  const [fErr, setFErr] = useState("");
+
+  const canPost   = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+
+  const suppliers = Object.values(state.parties).filter(p=>p.partyType==="supplier");
+  const yercaudCash = state.accounts[YERCAUD_CASH_ID];
+  const yercaudBal  = yercaudCash?.balance || 0;
+
+  // Cash & Bank accounts (excluding Yercaud cash itself) for funding
+  const fundSources = Object.values(state.accounts).filter(a=>
+    a.group==="Cash & Bank" && a.id!==YERCAUD_CASH_ID
+  );
+
+  const payments = (state.yercaudPayments||[]);
+
+  // Filtered payments
+  const filtered = payments.filter(p => {
+    if (filterParty!=="all" && p.partyId!==filterParty) return false;
+    if (filterMonth && !(p.date||"").startsWith(filterMonth)) return false;
+    return true;
+  });
+
+  // Summary stats
+  const totalPaid     = filtered.reduce((s,p)=>s+parseFloat(p.amount||0),0);
+  const uniqueParties = new Set(filtered.map(p=>p.partyId)).size;
+
+  // Per-party summary (unpaid advances = payments not yet matched to a GRN purchase voucher)
+  const partyAdvances = useMemo(()=>{
+    const map = {};
+    payments.forEach(p => {
+      if (!map[p.partyId]) map[p.partyId] = 0;
+      map[p.partyId] += parseFloat(p.amount||0);
+    });
+    return map;
+  }, [payments]);
+
+  const submitPayment = async () => {
+    if (!pForm.partyId)              { setPErr("Select a supplier"); return; }
+    if (!pForm.amount||parseFloat(pForm.amount)<=0) { setPErr("Enter amount"); return; }
+    if (parseFloat(pForm.amount) > yercaudBal && pForm.paymentMode==="cash") {
+      setPErr(`Insufficient Yercaud Cash balance (₹${fmt(yercaudBal)} available)`); return;
+    }
+    setPErr("");
+    await dispatch({ type:"ADD_YERCAUD_PAYMENT", data:{ ...pForm, amount:parseFloat(pForm.amount) }});
+    setShowForm(false);
+    setPForm({date:today(),partyId:"",amount:"",paymentMode:"cash",narration:"",reference:""});
+  };
+
+  const submitFund = async () => {
+    if (!fForm.fromAccount)              { setFErr("Select source account"); return; }
+    if (!fForm.amount||parseFloat(fForm.amount)<=0) { setFErr("Enter amount"); return; }
+    const src = state.accounts[fForm.fromAccount];
+    if (src && parseFloat(fForm.amount) > src.balance) {
+      setFErr(`Insufficient balance in ${src.name}`); return;
+    }
+    setFErr("");
+    await dispatch({ type:"FUND_YERCAUD_CASH", data:{ ...fForm, amount:parseFloat(fForm.amount) }});
+    setShowFund(false);
+    setFForm({date:today(),fromAccount:"cash",amount:"",narration:""});
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+
+      {/* Confirm delete */}
+      {confirmId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 24px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:17,marginBottom:8}}>Delete Payment?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>This will reverse the accounting entries and restore balances.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={async()=>{await dispatch({type:"DELETE_YERCAUD_PAYMENT",id:confirmId});setConfirmId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:20,fontWeight:800}}>🌿 Yercaud Payments</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Advance payments to suppliers at Yercaud</p>
+        </div>
+        {canPost&&(
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <Btn onClick={()=>setShowFund(true)} variant="outline" size="md">💰 Fund Yercaud Cash</Btn>
+            <Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Payment</Btn>
+          </div>
+        )}
+      </div>
+
+      {/* Summary cards */}
+      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+        {/* Yercaud Cash Balance */}
+        <div style={{...sh.card,flex:"1 1 200px",borderLeft:`4px solid ${yercaudBal>=0?C.green:C.red}`}}>
+          <div style={{fontSize:18,marginBottom:4}}>🌿</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Yercaud Cash Balance</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:yercaudBal>=0?C.green:C.red,marginTop:4}}>{fmt(yercaudBal)}</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:2}}>Available to pay suppliers</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 140px"}}>
+          <div style={{fontSize:18,marginBottom:4}}>📤</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Total Paid (filtered)</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.accent,marginTop:4}}>{fmt(totalPaid)}</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 140px"}}>
+          <div style={{fontSize:18,marginBottom:4}}>👥</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Suppliers Paid</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.accent,marginTop:4}}>{uniqueParties}</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 140px"}}>
+          <div style={{fontSize:18,marginBottom:4}}>📋</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>Total Payments</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:C.accent,marginTop:4}}>{filtered.length}</div>
+        </div>
+      </div>
+
+      {/* Fund Yercaud Cash form */}
+      {showFund&&(
+        <div style={{...sh.card,border:`2px solid ${C.blue}44`,background:"#f0f9ff"}}>
+          <div style={{fontWeight:800,color:C.blue,marginBottom:14,fontSize:15}}>💰 Fund Yercaud Cash</div>
+          <div style={{fontSize:13,color:C.muted,marginBottom:14,padding:"8px 12px",background:"#dbeafe",borderRadius:6}}>
+            Transfer money from main Cash or Bank → Yercaud Cash account. Use this whenever someone carries cash to Yercaud or withdraws from bank for Yercaud operations.
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+            <Field label="Date"><input type="date" value={fForm.date} onChange={e=>setFForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
+            <Field label="From Account (Source)">
+              <select value={fForm.fromAccount} onChange={e=>setFForm(f=>({...f,fromAccount:e.target.value}))} style={sh.input}>
+                {fundSources.map(a=>(
+                  <option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Amount (₹)">
+              <input type="number" value={fForm.amount} onChange={e=>setFForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input} autoFocus/>
+            </Field>
+            <Field label="Narration">
+              <input value={fForm.narration} onChange={e=>setFForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Cash sent with driver" style={sh.input}/>
+            </Field>
+          </div>
+          {parseFloat(fForm.amount||0)>0&&(
+            <div style={{marginTop:12,padding:"10px 14px",background:"#dbeafe",borderRadius:8,fontSize:13}}>
+              <strong>{state.accounts[fForm.fromAccount]?.name}</strong> → <strong>Yercaud Cash</strong>: <span style={{fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(fForm.amount)}</span>
+              <span style={{color:C.muted,marginLeft:8,fontSize:12}}>Contra entry (CV)</span>
+            </div>
+          )}
+          {fErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{fErr}</div>}
+          <div style={{display:"flex",gap:10,marginTop:14}}>
+            <Btn onClick={submitFund} variant="primary" size="lg">✓ Transfer Funds</Btn>
+            <Btn onClick={()=>{setShowFund(false);setFErr("");}} variant="ghost">Cancel</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* New Payment form */}
+      {showForm&&(
+        <div style={{...sh.card,border:`2px solid ${C.green}44`}}>
+          <div style={{fontWeight:800,color:C.green,marginBottom:14,fontSize:15}}>🌿 New Yercaud Payment</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+            <Field label="Date"><input type="date" value={pForm.date} onChange={e=>setPForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
+            <Field label="Supplier *">
+              <select value={pForm.partyId} onChange={e=>setPForm(f=>({...f,partyId:e.target.value}))} style={{...sh.input,borderColor:!pForm.partyId?"#f97316":C.border}}>
+                <option value="">— Select Supplier —</option>
+                {suppliers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Amount (₹) *">
+              <input type="number" value={pForm.amount} onChange={e=>setPForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input}/>
+            </Field>
+            <Field label="Payment Mode">
+              <select value={pForm.paymentMode} onChange={e=>setPForm(f=>({...f,paymentMode:e.target.value}))} style={sh.input}>
+                <option value="cash">Yercaud Cash</option>
+                <option value="bank_transfer">Bank Transfer / UPI</option>
+                <option value="cheque">Cheque</option>
+              </select>
+            </Field>
+            <Field label="Reference / UPI / Cheque No.">
+              <input value={pForm.reference} onChange={e=>setPForm(f=>({...f,reference:e.target.value}))} placeholder="Optional" style={sh.input}/>
+            </Field>
+            <Field label="Narration">
+              <input value={pForm.narration} onChange={e=>setPForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Advance for wet parchment" style={sh.input}/>
+            </Field>
+          </div>
+
+          {/* Preview */}
+          {pForm.partyId&&parseFloat(pForm.amount||0)>0&&(()=>{
+            const party = state.parties[pForm.partyId];
+            const partyAcc = state.accounts[pForm.partyId];
+            const currentBalance = partyAcc?.balance||0;
+            const afterBalance = currentBalance - parseFloat(pForm.amount);
+            return (
+              <div style={{marginTop:14,padding:"12px 16px",background:"#f0fdf4",borderRadius:8,fontSize:13}}>
+                <div style={{fontWeight:700,color:C.green,marginBottom:6}}>Accounting Entry Preview</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <div style={{padding:"8px 12px",background:C.cream,borderRadius:6}}>
+                    <div style={{fontSize:11,color:C.muted}}>Dr (Debit)</div>
+                    <div style={{fontWeight:700}}>{party?.name}</div>
+                    <div style={{fontFamily:"monospace",fontWeight:800,color:C.blue}}>{fmt(pForm.amount)}</div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>Reduces payable to supplier</div>
+                  </div>
+                  <div style={{padding:"8px 12px",background:C.cream,borderRadius:6}}>
+                    <div style={{fontSize:11,color:C.muted}}>Cr (Credit)</div>
+                    <div style={{fontWeight:700}}>{pForm.paymentMode==="cash"?"Yercaud Cash":"Bank Account"}</div>
+                    <div style={{fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(pForm.amount)}</div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>Cash paid out</div>
+                  </div>
+                </div>
+                <div style={{marginTop:10,fontSize:12,color:C.muted}}>
+                  {party?.name} balance: <span style={{fontFamily:"monospace",fontWeight:700,color:C.muted}}>{fmt(Math.abs(currentBalance))} {currentBalance>=0?"Dr":"Cr"}</span>
+                  {" → "}<span style={{fontFamily:"monospace",fontWeight:700,color:afterBalance>0?C.red:C.green}}>{fmt(Math.abs(afterBalance))} {afterBalance>=0?"Dr":"Cr"}</span>
+                  {currentBalance===0&&<span style={{color:C.muted}}> (advance — GRN not yet created)</span>}
+                </div>
+              </div>
+            );
+          })()}
+
+          {pErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{pErr}</div>}
+          <div style={{display:"flex",gap:10,marginTop:14}}>
+            <Btn onClick={submitPayment} variant="success" size="lg">✓ Record Payment</Btn>
+            <Btn onClick={()=>{setShowForm(false);setPErr("");}} variant="ghost">Cancel</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* Filters */}
+      <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <Field label="Party">
+          <select value={filterParty} onChange={e=>setFilterParty(e.target.value)} style={{...sh.input,width:160}}>
+            <option value="all">All Suppliers</option>
+            {suppliers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Month">
+          <input type="month" value={filterMonth} onChange={e=>setFilterMonth(e.target.value)} style={{...sh.input,width:150}}/>
+        </Field>
+        {(filterParty!=="all"||filterMonth)&&<Btn variant="ghost" size="sm" onClick={()=>{setFilterParty("all");setFilterMonth("");}}>✕ Clear</Btn>}
+        <span style={{marginLeft:"auto",color:C.muted,fontSize:13,alignSelf:"flex-end"}}>{filtered.length} payment{filtered.length!==1?"s":""} · {fmt(totalPaid)}</span>
+      </div>
+
+      {/* Per-party advance summary */}
+      {filterParty==="all"&&Object.keys(partyAdvances).length>0&&(
+        <div style={sh.card}>
+          <div style={{fontWeight:800,marginBottom:12,color:C.accent}}>📊 Advance Summary by Supplier</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            {Object.entries(partyAdvances).map(([partyId,total])=>{
+              const party=state.parties[partyId];
+              const partyBal=state.accounts[partyId]?.balance||0;
+              if(!party) return null;
+              return(
+                <div key={partyId} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 16px",minWidth:180}}>
+                  <div style={{fontWeight:700,fontSize:13,color:C.text}}>{party.name}</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:C.green,marginTop:2}}>{fmt(total)}</div>
+                  <div style={{fontSize:11,color:C.muted}}>total paid at Yercaud</div>
+                  <div style={{fontSize:11,marginTop:4,color:partyBal<0?C.green:partyBal>0?C.red:C.muted,fontWeight:600}}>
+                    Party balance: {fmt(Math.abs(partyBal))} {partyBal<0?"(credit — overpaid)":partyBal>0?"(still payable)":"(settled)"}
+                  </div>
+                </div>
+              );
+            }).filter(Boolean)}
+          </div>
+        </div>
+      )}
+
+      {/* Payments list */}
+      {filtered.length===0?(
+        <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+          <div style={{fontSize:40,marginBottom:8}}>🌿</div>
+          No Yercaud payments recorded yet.
+        </div>
+      ):(
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <div style={{background:"#f5ede4",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.accent,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>🌿 Yercaud Payment Register</span>
+            <span style={{fontFamily:"monospace",fontWeight:700,color:C.green}}>{fmt(totalPaid)}</span>
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",minWidth:500}}>
+              <thead><tr style={{background:"#fdf5ee"}}>
+                <th style={sh.th}>ID</th>
+                <th style={sh.th}>Date</th>
+                <th style={sh.th}>Supplier</th>
+                <th style={sh.th}>Mode</th>
+                <th style={sh.th}>Reference</th>
+                <th style={sh.th}>Narration</th>
+                <th style={{...sh.th,textAlign:"right"}}>Amount (₹)</th>
+                {canDelete&&<th style={{...sh.th,width:40}}></th>}
+              </tr></thead>
+              <tbody>
+                {filtered.map((p,i)=>{
+                  const party=state.parties[p.partyId];
+                  const modeLabel={cash:"🌿 Yercaud Cash",bank_transfer:"🏦 Bank/UPI",cheque:"📄 Cheque"}[p.paymentMode]||p.paymentMode;
+                  return(
+                    <tr key={p.id} style={{background:i%2===0?C.surface:C.cream}}>
+                      <td style={{...sh.td,fontFamily:"monospace",fontSize:11,fontWeight:700,color:C.accent}}>{p.id}</td>
+                      <td style={sh.td}>{p.date}</td>
+                      <td style={{...sh.td,fontWeight:600}}>{party?.name||"—"}</td>
+                      <td style={sh.td}><span style={{fontSize:11,fontWeight:600,color:C.muted}}>{modeLabel}</span></td>
+                      <td style={{...sh.td,fontSize:12,color:C.muted}}>{p.reference||"—"}</td>
+                      <td style={{...sh.td,fontSize:12,color:C.muted,fontStyle:"italic"}}>{p.narration||"—"}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmt(p.amount)}</td>
+                      {canDelete&&<td style={{...sh.td,textAlign:"center"}}>
+                        <button onClick={()=>setConfirmId(p.id)} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14}}>🗑</button>
+                      </td>}
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot><tr style={{background:"#f5ede4"}}>
+                <td colSpan={6} style={{padding:"10px 16px",fontWeight:800,color:C.accent}}>Total</td>
+                <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmt(totalPaid)}</td>
+                {canDelete&&<td></td>}
+              </tr></tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── OPENING BALANCE MODULE ────────────────────────────────────────
+function OpeningBalanceModule({ state, dispatch }) {
+  const [date, setDate]     = useState(today());
+  const [balances, setBalances] = useState({});
+  const [saving, setSavingOB]   = useState(false);
+  const [done, setDone]         = useState(false);
+  const [err, setErr]           = useState("");
+
+  const set = (id, val) => setBalances(b => ({...b, [id]: val}));
+
+  // Group accounts
+  const cashBank   = Object.values(state.accounts).filter(a=>a.group==="Cash & Bank"&&!a.isParty);
+  const suppliers  = Object.values(state.parties).filter(p=>p.partyType==="supplier");
+  const customers  = Object.values(state.parties).filter(p=>p.partyType==="customer");
+  const otherAccs  = Object.values(state.accounts).filter(a=>!a.isParty&&a.group!=="Cash & Bank"&&a.id!=="opening_balance_equity");
+
+  const post = async () => {
+    setSavingOB(true); setErr("");
+    try {
+      await dispatch({ type:"POST_OPENING_BALANCES", date, balances });
+      setDone(true);
+    } catch(e) { setErr(e.message); }
+    setSavingOB(false);
+  };
+
+  const SectionHeader = ({title, sub}) => (
+    <div style={{background:"#f5ede4",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.accent,borderBottom:`1px solid ${C.border}`}}>
+      {title} {sub&&<span style={{fontWeight:400,fontSize:12,color:C.muted,marginLeft:6}}>{sub}</span>}
+    </div>
+  );
+
+  const BalRow = ({id, label, sub, direction="asset"}) => (
+    <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px 16px",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+      <div style={{flex:1,minWidth:160}}>
+        <div style={{fontSize:13,fontWeight:600,color:C.text}}>{label}</div>
+        {sub&&<div style={{fontSize:11,color:C.muted}}>{sub}</div>}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontSize:12,color:C.muted,minWidth:80,textAlign:"right"}}>
+          {direction==="asset"?"Balance (₹)":direction==="we_owe"?"We Owe (₹)":"They Owe Us (₹)"}
+        </span>
+        <input type="number" value={balances[id]||""} onChange={e=>set(id,e.target.value)}
+          placeholder="0.00"
+          style={{...sh.input,width:130,textAlign:"right",
+            borderColor:parseFloat(balances[id]||0)>0?"#22c55e":C.border}}/>
+      </div>
+    </div>
+  );
+
+  if (done) return (
+    <div style={{...sh.card,textAlign:"center",padding:48}}>
+      <div style={{fontSize:48,marginBottom:12}}>✅</div>
+      <div style={{fontWeight:800,fontSize:20,color:C.green,marginBottom:8}}>Opening Balances Posted!</div>
+      <div style={{color:C.muted,fontSize:13,marginBottom:20}}>A Journal Voucher has been created for {date}. You can view it in Day Book.</div>
+      <Btn onClick={()=>setDone(false)} variant="outline">Enter More / Edit</Btn>
+    </div>
+  );
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+      <div>
+        <h2 style={{margin:0,color:C.text,fontSize:20,fontWeight:800}}>🏦 Opening Balances</h2>
+        <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Enter balances as of your go-live date — no accounting knowledge needed</p>
+      </div>
+
+      <div style={{...sh.card,background:"#fffbeb",border:`1px solid #fcd34d`}}>
+        <div style={{fontWeight:700,color:"#92400e",marginBottom:4}}>⚠️ Do this only once</div>
+        <div style={{fontSize:13,color:"#78350f"}}>Post opening balances once when you start using the system. After posting, use regular vouchers for all transactions. Re-posting will create duplicate entries.</div>
+      </div>
+
+      <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+        <SectionHeader title="📅 Go-Live Date"/>
+        <div style={{padding:"14px 16px"}}>
+          <Field label="Opening Balance Date">
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{...sh.input,maxWidth:200}}/>
+          </Field>
+          <div style={{fontSize:12,color:C.muted,marginTop:6}}>All balances will be posted as of this date</div>
+        </div>
+      </div>
+
+      {/* Cash & Bank */}
+      <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+        <SectionHeader title="💵 Cash & Bank" sub="Enter balance on go-live date"/>
+        {cashBank.length===0
+          ? <div style={{padding:20,color:C.muted,fontSize:13}}>No cash/bank accounts found. Add them in Accounts first.</div>
+          : cashBank.map(a=><BalRow key={a.id} id={a.id} label={a.name} direction="asset"/>)
+        }
+      </div>
+
+      {/* Suppliers — we owe them */}
+      <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+        <SectionHeader title="📤 Suppliers" sub="Amount you owe each supplier on go-live date"/>
+        {suppliers.length===0
+          ? <div style={{padding:20,color:C.muted,fontSize:13}}>No suppliers found. Add them in Parties first.</div>
+          : suppliers.map(p=><BalRow key={p.id} id={`sup_${p.id}`} label={p.name} sub="Supplier" direction="we_owe"/>)
+        }
+      </div>
+
+      {/* Customers — they owe us */}
+      <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+        <SectionHeader title="📥 Buyers / Customers" sub="Amount each buyer owes you on go-live date"/>
+        {customers.length===0
+          ? <div style={{padding:20,color:C.muted,fontSize:13}}>No customers found. Add them in Parties first.</div>
+          : customers.map(p=><BalRow key={p.id} id={`cus_${p.id}`} label={p.name} sub="Customer" direction="they_owe"/>)
+        }
+      </div>
+
+      {/* Other accounts */}
+      {otherAccs.length>0&&(
+        <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+          <SectionHeader title="🗂 Other Accounts" sub="Capital, loans, payables etc."/>
+          {otherAccs.map(a=>(
+            <div key={a.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 16px",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+              <div style={{flex:1,minWidth:160}}>
+                <div style={{fontSize:13,fontWeight:600,color:C.text}}>{a.name}</div>
+                <div style={{fontSize:11,color:C.muted}}>{a.group} · {a.type}</div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                <select value={balances[`dir_${a.id}`]||"normal"} onChange={e=>set(`dir_${a.id}`,e.target.value)} style={{...sh.input,width:130}}>
+                  <option value="normal">{["asset","expense"].includes(a.type)?"We are owed":"We owe"}</option>
+                  <option value="reverse">{["asset","expense"].includes(a.type)?"We owe":"We are owed"}</option>
+                </select>
+                <input type="number" value={balances[a.id]||""} onChange={e=>set(a.id,e.target.value)}
+                  placeholder="0.00" style={{...sh.input,width:130,textAlign:"right",borderColor:parseFloat(balances[a.id]||0)>0?"#22c55e":C.border}}/>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {err&&<div style={{color:C.red,fontWeight:700,fontSize:13,padding:"10px 14px",background:"#fee2e2",borderRadius:6}}>{err}</div>}
+
+      <div style={{display:"flex",gap:10,alignItems:"center"}}>
+        <Btn onClick={post} variant="success" size="lg" disabled={saving}>
+          {saving?"⏳ Posting...":"✓ Post Opening Balances"}
+        </Btn>
+        <span style={{fontSize:12,color:C.muted}}>Creates a Journal Voucher dated {date}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── LOADMAN MODULE ────────────────────────────────────────────────
+const LOADMAN_SERVICES = [
+  "Unloading from Vehicle",
+  "Taking Delivery from Party",
+  "Inter-Company Transfer",
+  "Bulking & Packing",
+  "Loading to Vehicle",
+];
+const LOADMAN_PAYABLE_ID = "loadman_payable";
+const LOADMAN_EXPENSE_ID = "loadman_expense";
+
+function LoadmanModule({ state, dispatch, role }) {
+  const [activeTab, setActiveTab] = useState("charges"); // charges | rates | payments
+  const [showForm,  setShowForm]  = useState(false);
+  const [showPay,   setShowPay]   = useState(false);
+  const [confirmId, setConfirmId] = useState(null);
+  const [filterService, setFilterService] = useState("all");
+  const [filterMonth,   setFilterMonth]   = useState("");
+
+  // Charge form
+  const [form, setForm] = useState({
+    date:today(), serviceType:LOADMAN_SERVICES[0], linkedTo:"standalone",
+    linkedId:"", bags:"", weightKg:"", unit:"bags",
+    rate:"", amount:"", whoBearsIt:"company",
+    partyId:"", narration:"",
+  });
+  // Payment form
+  const [payForm, setPayForm] = useState({
+    date:today(), amount:"", paymentAccount:"cash", narration:"",
+  });
+  const [formErr, setFormErr] = useState("");
+  const [payErr,  setPayErr]  = useState("");
+
+  const canPost   = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+  const set = (f,v) => setForm(p => {
+    const next = {...p,[f]:v};
+    if (f==="bags"||f==="rate"||f==="weightKg") {
+      const qty = next.unit==="bags" ? parseFloat(next.bags||0) : parseFloat(next.weightKg||0);
+      next.amount = (qty * parseFloat(next.rate||0)).toFixed(2);
+    }
+    if (f==="unit") {
+      const qty = v==="bags" ? parseFloat(next.bags||0) : parseFloat(next.weightKg||0);
+      next.amount = (qty * parseFloat(next.rate||0)).toFixed(2);
+    }
+    return next;
+  });
+
+  const rates    = state.loadmanRates||[];
+  const charges  = state.loadmanCharges||[];
+  const parties  = Object.values(state.parties);
+  const cashBankAccounts = Object.values(state.accounts).filter(a=>a.group==="Cash & Bank");
+  const loadmanPayable   = state.accounts[LOADMAN_PAYABLE_ID];
+  const pendingBalance   = loadmanPayable?.balance || 0;
+
+  // Prefill rate when service changes
+  const prefillRate = (service) => {
+    const r = rates.find(r=>r.serviceType===service);
+    if (r) set("rate", r.rate);
+  };
+
+  const filtered = charges.filter(c=>{
+    if (filterService!=="all" && c.serviceType!==filterService) return false;
+    if (filterMonth && !(c.date||"").startsWith(filterMonth)) return false;
+    return true;
+  });
+
+  const submitCharge = async () => {
+    if (!form.amount||parseFloat(form.amount)<=0) { setFormErr("Enter quantity and rate to calculate amount"); return; }
+    if (form.whoBearsIt==="party"&&!form.partyId) { setFormErr("Select a party"); return; }
+    setFormErr("");
+    await dispatch({type:"ADD_LOADMAN_CHARGE", data:{...form, amount:parseFloat(form.amount)}});
+    setShowForm(false);
+    setForm({date:today(),serviceType:LOADMAN_SERVICES[0],linkedTo:"standalone",linkedId:"",bags:"",weightKg:"",unit:"bags",rate:"",amount:"",whoBearsIt:"company",partyId:"",narration:""});
+  };
+
+  const submitPayment = async () => {
+    if (!payForm.amount||parseFloat(payForm.amount)<=0) { setPayErr("Enter amount"); return; }
+    if (parseFloat(payForm.amount) > pendingBalance) { setPayErr(`Cannot pay more than pending balance ${fmt(pendingBalance)}`); return; }
+    setPayErr("");
+    await dispatch({type:"PAY_LOADMAN", data:{...payForm, amount:parseFloat(payForm.amount)}});
+    setShowPay(false);
+    setPayForm({date:today(),amount:"",paymentAccount:"cash",narration:""});
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+
+      {confirmId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 24px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:17,marginBottom:8}}>Delete Charge?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>Accounting entries will be reversed.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={async()=>{await dispatch({type:"DELETE_LOADMAN_CHARGE",id:confirmId});setConfirmId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:20,fontWeight:800}}>👷 Loadman Charges</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Labour charges for loading, unloading & handling</p>
+        </div>
+        {canPost&&(
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <Btn onClick={()=>setShowPay(true)} variant="outline">💵 Pay Loadman</Btn>
+            <Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Charge</Btn>
+          </div>
+        )}
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+        <div style={{...sh.card,flex:"1 1 180px",borderLeft:`4px solid ${C.red}`}}>
+          <div style={{fontSize:16,marginBottom:3}}>⏳</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Pending Payment</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:pendingBalance>0?C.red:C.green,marginTop:3}}>{fmt(pendingBalance)}</div>
+          <div style={{fontSize:11,color:C.muted}}>owed to loadman</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
+          <div style={{fontSize:16,marginBottom:3}}>📋</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Total Charges</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:3}}>{fmt(filtered.reduce((s,c)=>s+parseFloat(c.amount||0),0))}</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
+          <div style={{fontSize:16,marginBottom:3}}>🏢</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Company Bears</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:3}}>{fmt(filtered.filter(c=>c.whoBearsIt==="company").reduce((s,c)=>s+parseFloat(c.amount||0),0))}</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
+          <div style={{fontSize:16,marginBottom:3}}>👥</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Party Bears</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:3}}>{fmt(filtered.filter(c=>c.whoBearsIt==="party").reduce((s,c)=>s+parseFloat(c.amount||0),0))}</div>
+        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{display:"flex",gap:6,borderBottom:`2px solid ${C.border}`,paddingBottom:0}}>
+        {[["charges","📋 Charges"],["rates","⚙️ Rates Master"],["payments","💵 Payments"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setActiveTab(id)} style={{padding:"8px 16px",border:"none",borderBottom:`3px solid ${activeTab===id?C.accent:"transparent"}`,background:"transparent",color:activeTab===id?C.accent:C.muted,fontWeight:activeTab===id?700:500,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+        ))}
+      </div>
+
+      {/* ── RATES MASTER TAB ── */}
+      {activeTab==="rates"&&(
+        <div style={sh.card}>
+          <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>⚙️ Service Rates Master</div>
+          <div style={{fontSize:13,color:C.muted,marginBottom:14}}>Set default rates per service. These prefill when creating a charge but can be overridden per entry.</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {LOADMAN_SERVICES.map(svc=>{
+              const existing = rates.find(r=>r.serviceType===svc);
+              return <LoadmanRateRow key={svc} service={svc} existing={existing} dispatch={dispatch}/>;
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── PAYMENTS TAB ── */}
+      {activeTab==="payments"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {showPay&&(
+            <div style={{...sh.card,border:`2px solid ${C.green}44`}}>
+              <div style={{fontWeight:800,color:C.green,marginBottom:12,fontSize:15}}>💵 Pay Loadman</div>
+              <div style={{padding:"8px 12px",background:"#f0fdf4",borderRadius:6,fontSize:13,marginBottom:12}}>
+                Pending balance: <strong style={{fontFamily:"monospace",color:C.red}}>{fmt(pendingBalance)}</strong>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+                <Field label="Date"><input type="date" value={payForm.date} onChange={e=>setPayForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
+                <Field label="Amount (₹)"><input type="number" value={payForm.amount} onChange={e=>setPayForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input} autoFocus/></Field>
+                <Field label="Pay From">
+                  <select value={payForm.paymentAccount} onChange={e=>setPayForm(f=>({...f,paymentAccount:e.target.value}))} style={sh.input}>
+                    {cashBankAccounts.map(a=><option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>)}
+                  </select>
+                </Field>
+                <Field label="Narration"><input value={payForm.narration} onChange={e=>setPayForm(f=>({...f,narration:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+              </div>
+              {payErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{payErr}</div>}
+              <div style={{display:"flex",gap:10,marginTop:14}}>
+                <Btn onClick={submitPayment} variant="success" size="lg">✓ Record Payment</Btn>
+                <Btn onClick={()=>{setShowPay(false);setPayErr("");}} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          )}
+          {/* Payments list from vouchers */}
+          <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+            <div style={{background:"#f5ede4",padding:"10px 16px",fontWeight:800,fontSize:13,color:C.accent}}>Payment History</div>
+            {(()=>{
+              const payVouchers = state.vouchers.filter(v=>v.entries?.some(e=>e.accountId===LOADMAN_PAYABLE_ID&&parseFloat(e.dr||0)>0)&&v.voucherType==="PV");
+              if(!payVouchers.length) return <div style={{padding:24,color:C.muted,textAlign:"center",fontSize:13}}>No payments made yet</div>;
+              return (
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",minWidth:420}}>
+                    <thead><tr style={{background:"#fdf5ee"}}>
+                      <th style={sh.th}>Date</th><th style={sh.th}>Voucher</th>
+                      <th style={sh.th}>Narration</th><th style={{...sh.th,textAlign:"right"}}>Amount (₹)</th>
+                    </tr></thead>
+                    <tbody>{payVouchers.map((v,i)=>{
+                      const amt=v.entries.filter(e=>e.accountId===LOADMAN_PAYABLE_ID&&parseFloat(e.dr||0)>0).reduce((s,e)=>s+parseFloat(e.dr||0),0);
+                      return(<tr key={v.id} style={{background:i%2===0?C.surface:C.cream}}>
+                        <td style={sh.td}>{v.date}</td>
+                        <td style={{...sh.td,fontFamily:"monospace",fontSize:11}}>{v.id}</td>
+                        <td style={{...sh.td,color:C.muted}}>{v.narration||"—"}</td>
+                        <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:C.green}}>{fmt(amt)}</td>
+                      </tr>);
+                    })}</tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* ── CHARGES TAB ── */}
+      {activeTab==="charges"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:16}}>
+          {showForm&&(
+            <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+              <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>👷 New Loadman Charge</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+                <Field label="Date"><input type="date" value={form.date} onChange={e=>set("date",e.target.value)} style={sh.input}/></Field>
+                <Field label="Service Type">
+                  <select value={form.serviceType} onChange={e=>{set("serviceType",e.target.value);prefillRate(e.target.value);}} style={sh.input}>
+                    {LOADMAN_SERVICES.map(s=><option key={s} value={s}>{s}</option>)}
+                  </select>
+                </Field>
+                <Field label="Unit">
+                  <select value={form.unit} onChange={e=>set("unit",e.target.value)} style={sh.input}>
+                    <option value="bags">Bags</option>
+                    <option value="kg">KG</option>
+                  </select>
+                </Field>
+                <Field label={form.unit==="bags"?"No. of Bags":"Weight (kg)"}>
+                  <input type="number" value={form.unit==="bags"?form.bags:form.weightKg}
+                    onChange={e=>set(form.unit==="bags"?"bags":"weightKg",e.target.value)}
+                    placeholder="0" style={sh.input}/>
+                </Field>
+                <Field label="Rate (₹ per unit)">
+                  <input type="number" value={form.rate} onChange={e=>set("rate",e.target.value)} placeholder="0.00" style={sh.input}/>
+                </Field>
+                <Field label="Amount (₹)">
+                  <input value={form.amount} readOnly style={{...sh.input,background:"#f0fdf4",fontWeight:800,color:C.green}}/>
+                </Field>
+                <Field label="Linked To">
+                  <select value={form.linkedTo} onChange={e=>set("linkedTo",e.target.value)} style={sh.input}>
+                    <option value="standalone">Standalone</option>
+                    <option value="grn">GRN</option>
+                    <option value="sale">Sale</option>
+                    <option value="transfer">Transfer</option>
+                  </select>
+                </Field>
+                {form.linkedTo!=="standalone"&&(
+                  <Field label={`${form.linkedTo.toUpperCase()} ID`}>
+                    <input value={form.linkedId} onChange={e=>set("linkedId",e.target.value)} placeholder={`e.g. GRN-0001`} style={sh.input}/>
+                  </Field>
+                )}
+                <Field label="Who Bears This Cost?">
+                  <select value={form.whoBearsIt} onChange={e=>set("whoBearsIt",e.target.value)} style={sh.input}>
+                    <option value="company">Company (our expense)</option>
+                    <option value="party">Party (charge to party)</option>
+                  </select>
+                </Field>
+                {form.whoBearsIt==="party"&&(
+                  <Field label="Party">
+                    <select value={form.partyId} onChange={e=>set("partyId",e.target.value)} style={{...sh.input,borderColor:!form.partyId?"#f97316":C.border}}>
+                      <option value="">— Select Party —</option>
+                      {Object.values(state.parties).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </Field>
+                )}
+                <Field label="Narration"><input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+              </div>
+              {form.amount>0&&(
+                <div style={{marginTop:12,padding:"10px 14px",background:"#f5ede4",borderRadius:8,fontSize:12}}>
+                  <strong>Entry: </strong>
+                  {form.whoBearsIt==="company"
+                    ? <>Dr <strong>Loadman Expense</strong> → Cr <strong>Loadman Payable</strong> · {fmt(form.amount)}</>
+                    : <>Dr <strong>{state.parties[form.partyId]?.name||"Party"}</strong> → Cr <strong>Loadman Payable</strong> · {fmt(form.amount)}</>}
+                </div>
+              )}
+              {formErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{formErr}</div>}
+              <div style={{display:"flex",gap:10,marginTop:14}}>
+                <Btn onClick={submitCharge} variant="success" size="lg">✓ Save Charge</Btn>
+                <Btn onClick={()=>{setShowForm(false);setFormErr("");}} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          )}
+
+          {/* Filters */}
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <Field label="Service">
+              <select value={filterService} onChange={e=>setFilterService(e.target.value)} style={{...sh.input,width:180}}>
+                <option value="all">All Services</option>
+                {LOADMAN_SERVICES.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </Field>
+            <Field label="Month"><input type="month" value={filterMonth} onChange={e=>setFilterMonth(e.target.value)} style={{...sh.input,width:150}}/></Field>
+            {(filterService!=="all"||filterMonth)&&<Btn variant="ghost" size="sm" onClick={()=>{setFilterService("all");setFilterMonth("");}}>✕</Btn>}
+            <span style={{marginLeft:"auto",color:C.muted,fontSize:13,alignSelf:"flex-end"}}>{filtered.length} entries</span>
+          </div>
+
+          {filtered.length===0?(
+            <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
+              <div style={{fontSize:40,marginBottom:8}}>👷</div>No loadman charges yet.
+            </div>
+          ):(
+            <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",minWidth:560}}>
+                  <thead><tr style={{background:"#f5ede4"}}>
+                    <th style={sh.th}>ID</th><th style={sh.th}>Date</th><th style={sh.th}>Service</th>
+                    <th style={sh.th}>Qty</th><th style={sh.th}>Linked</th>
+                    <th style={sh.th}>Bears</th><th style={{...sh.th,textAlign:"right"}}>Amount</th>
+                    {canDelete&&<th style={{...sh.th,width:36}}></th>}
+                  </tr></thead>
+                  <tbody>{filtered.map((c,i)=>{
+                    const party=state.parties[c.partyId];
+                    return(
+                      <tr key={c.id} style={{background:i%2===0?C.surface:C.cream}}>
+                        <td style={{...sh.td,fontFamily:"monospace",fontSize:11,fontWeight:700,color:C.accent}}>{c.id}</td>
+                        <td style={sh.td}>{c.date}</td>
+                        <td style={{...sh.td,fontWeight:600,fontSize:12}}>{c.serviceType}</td>
+                        <td style={{...sh.td,fontSize:12,fontFamily:"monospace"}}>{c.unit==="bags"?`${c.bags} bags`:`${c.weightKg} kg`}</td>
+                        <td style={{...sh.td,fontSize:11,color:C.muted}}>{c.linkedTo!=="standalone"?`${c.linkedTo.toUpperCase()} ${c.linkedId}`:"—"}</td>
+                        <td style={sh.td}>
+                          {c.whoBearsIt==="company"
+                            ? <span style={{fontSize:11,background:"#fef3c7",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:600}}>Company</span>
+                            : <span style={{fontSize:11,background:"#eff6ff",color:C.blue,padding:"2px 8px",borderRadius:10,fontWeight:600}}>{party?.name||"Party"}</span>}
+                        </td>
+                        <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.accent}}>{fmt(c.amount)}</td>
+                        {canDelete&&<td style={{...sh.td,textAlign:"center"}}>
+                          <button onClick={()=>setConfirmId(c.id)} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14}}>🗑</button>
+                        </td>}
+                      </tr>
+                    );
+                  })}</tbody>
+                  <tfoot><tr style={{background:"#f5ede4"}}>
+                    <td colSpan={6} style={{padding:"10px 16px",fontWeight:800}}>Total</td>
+                    <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.accent}}>{fmt(filtered.reduce((s,c)=>s+parseFloat(c.amount||0),0))}</td>
+                    {canDelete&&<td></td>}
+                  </tr></tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LoadmanRateRow({ service, existing, dispatch }) {
+  const [editing, setEditing] = useState(false);
+  const [rate,    setRate]    = useState(existing?.rate||"");
+  const [unit,    setUnit]    = useState(existing?.unit||"bags");
+  const save = async () => {
+    await dispatch({type:"SAVE_LOADMAN_RATE", data:{serviceType:service, rate:parseFloat(rate||0), unit, id:existing?.id}});
+    setEditing(false);
+  };
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:C.cream,borderRadius:8,flexWrap:"wrap"}}>
+      <span style={{flex:1,fontSize:13,fontWeight:600,color:C.text}}>{service}</span>
+      {editing?(
+        <>
+          <select value={unit} onChange={e=>setUnit(e.target.value)} style={{...sh.input,width:90}}>
+            <option value="bags">per bag</option><option value="kg">per kg</option>
+          </select>
+          <input type="number" value={rate} onChange={e=>setRate(e.target.value)} placeholder="0.00" style={{...sh.input,width:100,textAlign:"right"}} autoFocus/>
+          <Btn size="sm" variant="success" onClick={save}>✓ Save</Btn>
+          <Btn size="sm" variant="ghost" onClick={()=>setEditing(false)}>Cancel</Btn>
+        </>
+      ):(
+        <>
+          <span style={{fontFamily:"monospace",fontWeight:700,color:existing?C.green:C.muted,fontSize:13}}>
+            {existing?`₹${existing.rate}/${existing.unit==="bags"?"bag":"kg"}`:"Not set"}
+          </span>
+          <Btn size="sm" variant="outline" onClick={()=>setEditing(true)}>✏ Edit</Btn>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── LORRY MODULE ──────────────────────────────────────────────────
+const LORRY_PAYABLE_PREFIX = "lorry_";
+const LORRY_EXPENSE_ID     = "lorry_expense";
+
+function LorryModule({ state, dispatch, role }) {
+  const [activeTab, setActiveTab] = useState("rentals"); // rentals | owners | payments
+  const [showForm,  setShowForm]  = useState(false);
+  const [showOwnerForm, setShowOwnerForm] = useState(false);
+  const [editOwner, setEditOwner] = useState(null);
+  const [showPay,   setShowPay]   = useState(null); // ownerId
+  const [confirmRentalId, setConfirmRentalId] = useState(null);
+
+  // Rental form
+  const [form, setForm] = useState({
+    date:today(), lorryOwnerId:"", vehicleNo:"",
+    fromLocation:"", toLocation:"", linkedTo:"standalone", linkedId:"",
+    bags:"", weightKg:"", unit:"trip", rate:"", amount:"",
+    whoBearsIt:"company", partyId:"", narration:"",
+  });
+  // Owner form
+  const [ownerForm, setOwnerForm] = useState({name:"", phone:"", vehicles:""});
+  // Payment form
+  const [payForm, setPayForm] = useState({
+    date:today(), ownerId:"", amount:"", paymentMode:"cash",
+    paymentAccount:"cash", narration:"",
+  });
+  const [formErr, setFormErr] = useState("");
+  const [payErr,  setPayErr]  = useState("");
+
+  const canPost   = ROLES[role]?.canPost;
+  const canDelete = ROLES[role]?.canDelete;
+
+  const lorryOwners  = state.lorryOwners||[];
+  const lorryRentals = state.lorryRentals||[];
+  const lorryPayments= state.lorryPayments||[];
+  const parties      = Object.values(state.parties);
+  const cashBankAccounts = Object.values(state.accounts).filter(a=>a.group==="Cash & Bank");
+
+  const setF = (f,v) => setForm(p=>{
+    const next={...p,[f]:v};
+    if(["rate","bags","weightKg"].includes(f)) {
+      const qty = next.unit==="trip"?1:next.unit==="bags"?parseFloat(next.bags||0):parseFloat(next.weightKg||0);
+      next.amount = (qty * parseFloat(next.rate||0)).toFixed(2);
+    }
+    return next;
+  });
+
+  // Per owner pending balance from accounts
+  const ownerBalance = (ownerId) => {
+    const accId = LORRY_PAYABLE_PREFIX + ownerId;
+    return state.accounts[accId]?.balance || 0;
+  };
+
+  const totalPending = lorryOwners.reduce((s,o)=>s+ownerBalance(o.id),0);
+
+  const submitRental = async () => {
+    if (!form.lorryOwnerId)    { setFormErr("Select lorry owner"); return; }
+    if (!form.vehicleNo.trim()){ setFormErr("Enter vehicle number"); return; }
+    if (!form.amount||parseFloat(form.amount)<=0) { setFormErr("Enter rate/amount"); return; }
+    if (form.whoBearsIt==="party"&&!form.partyId) { setFormErr("Select a party"); return; }
+    setFormErr("");
+    await dispatch({type:"ADD_LORRY_RENTAL", data:{...form, amount:parseFloat(form.amount)}});
+    setShowForm(false);
+    setForm({date:today(),lorryOwnerId:"",vehicleNo:"",fromLocation:"",toLocation:"",linkedTo:"standalone",linkedId:"",bags:"",weightKg:"",unit:"trip",rate:"",amount:"",whoBearsIt:"company",partyId:"",narration:""});
+  };
+
+  const submitOwner = async () => {
+    if (!ownerForm.name.trim()) { setFormErr("Enter owner name"); return; }
+    setFormErr("");
+    if (editOwner) {
+      await dispatch({type:"EDIT_LORRY_OWNER", id:editOwner.id, data:ownerForm});
+      setEditOwner(null);
+    } else {
+      await dispatch({type:"ADD_LORRY_OWNER", data:ownerForm});
+      setShowOwnerForm(false);
+    }
+    setOwnerForm({name:"",phone:"",vehicles:""});
+  };
+
+  const submitPayment = async () => {
+    if (!payForm.ownerId)             { setPayErr("Select lorry owner"); return; }
+    if (!payForm.amount||parseFloat(payForm.amount)<=0) { setPayErr("Enter amount"); return; }
+    const pending = ownerBalance(payForm.ownerId);
+    if (parseFloat(payForm.amount) > pending) { setPayErr(`Cannot pay more than pending balance ${fmt(pending)}`); return; }
+    setPayErr("");
+    await dispatch({type:"PAY_LORRY_OWNER", data:{...payForm, amount:parseFloat(payForm.amount)}});
+    setShowPay(null);
+    setPayForm({date:today(),ownerId:"",amount:"",paymentMode:"cash",paymentAccount:"cash",narration:""});
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+
+      {confirmRentalId&&(
+        <div style={{position:"fixed",inset:0,background:"#00000066",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:C.surface,borderRadius:14,padding:"28px 24px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px #00000044"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:17,marginBottom:8}}>Delete Rental?</div>
+            <div style={{fontSize:13,color:C.muted,marginBottom:20}}>Accounting entries will be reversed.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <Btn variant="danger" onClick={async()=>{await dispatch({type:"DELETE_LORRY_RENTAL",id:confirmRentalId});setConfirmRentalId(null);}}>Yes, Delete</Btn>
+              <Btn variant="ghost" onClick={()=>setConfirmRentalId(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:20,fontWeight:800}}>🚛 Lorry Rental</h2>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Lorry hire charges — per owner running account</p>
+        </div>
+        {canPost&&(
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {activeTab==="owners"&&<Btn onClick={()=>setShowOwnerForm(true)} variant="success" size="lg">+ Add Owner</Btn>}
+            {activeTab==="rentals"&&<Btn onClick={()=>setShowForm(true)} variant="success" size="lg">+ New Rental</Btn>}
+            {activeTab==="payments"&&<Btn onClick={()=>setShowPay("new")} variant="success" size="lg">+ Pay Owner</Btn>}
+          </div>
+        )}
+      </div>
+
+      {/* Summary */}
+      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+        <div style={{...sh.card,flex:"1 1 180px",borderLeft:`4px solid ${C.red}`}}>
+          <div style={{fontSize:16,marginBottom:3}}>⏳</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Total Pending</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:totalPending>0?C.red:C.green,marginTop:3}}>{fmt(totalPending)}</div>
+          <div style={{fontSize:11,color:C.muted}}>across all owners</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
+          <div style={{fontSize:16,marginBottom:3}}>🚛</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Total Rentals</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:3}}>{lorryRentals.length}</div>
+        </div>
+        <div style={{...sh.card,flex:"1 1 130px"}}>
+          <div style={{fontSize:16,marginBottom:3}}>👤</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Lorry Owners</div>
+          <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:C.accent,marginTop:3}}>{lorryOwners.length}</div>
+        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{display:"flex",gap:6,borderBottom:`2px solid ${C.border}`}}>
+        {[["rentals","🚛 Rentals"],["owners","👤 Owners"],["payments","💵 Payments"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setActiveTab(id)} style={{padding:"8px 16px",border:"none",borderBottom:`3px solid ${activeTab===id?C.accent:"transparent"}`,background:"transparent",color:activeTab===id?C.accent:C.muted,fontWeight:activeTab===id?700:500,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+        ))}
+      </div>
+
+      {/* ── OWNERS TAB ── */}
+      {activeTab==="owners"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {(showOwnerForm||editOwner)&&(
+            <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+              <div style={{fontWeight:800,color:C.accent,marginBottom:12,fontSize:15}}>{editOwner?"✏ Edit Owner":"👤 New Lorry Owner"}</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+                <Field label="Owner Name *"><input value={ownerForm.name} onChange={e=>setOwnerForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Murugan" style={sh.input} autoFocus/></Field>
+                <Field label="Phone"><input value={ownerForm.phone} onChange={e=>setOwnerForm(f=>({...f,phone:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+                <Field label="Vehicle Numbers"><input value={ownerForm.vehicles} onChange={e=>setOwnerForm(f=>({...f,vehicles:e.target.value}))} placeholder="e.g. TN33 AB 1234, TN33 CD 5678" style={sh.input}/></Field>
+              </div>
+              {formErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{formErr}</div>}
+              <div style={{display:"flex",gap:10,marginTop:14}}>
+                <Btn onClick={submitOwner} variant="success" size="lg">✓ {editOwner?"Save Changes":"Add Owner"}</Btn>
+                <Btn onClick={()=>{setShowOwnerForm(false);setEditOwner(null);setOwnerForm({name:"",phone:"",vehicles:""});setFormErr("");}} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          )}
+          {lorryOwners.length===0?(
+            <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}><div style={{fontSize:40,marginBottom:8}}>👤</div>No lorry owners added yet.</div>
+          ):lorryOwners.map(o=>{
+            const pending = ownerBalance(o.id);
+            const tripCount = lorryRentals.filter(r=>r.lorryOwnerId===o.id).length;
+            return(
+              <div key={o.id} style={sh.card}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:15,color:C.text}}>{o.name}</div>
+                    {o.phone&&<div style={{fontSize:12,color:C.muted,marginTop:2}}>📞 {o.phone}</div>}
+                    {o.vehicles&&<div style={{fontSize:12,color:C.muted}}>🚛 {o.vehicles}</div>}
+                    <div style={{fontSize:12,color:C.muted,marginTop:4}}>{tripCount} trip{tripCount!==1?"s":""}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontFamily:"monospace",fontWeight:800,fontSize:18,color:pending>0?C.red:C.green}}>{fmt(pending)}</div>
+                    <div style={{fontSize:11,color:C.muted}}>pending payment</div>
+                    <div style={{display:"flex",gap:6,marginTop:8,justifyContent:"flex-end"}}>
+                      {canPost&&pending>0&&<Btn size="sm" variant="success" onClick={()=>{setPayForm(f=>({...f,ownerId:o.id}));setShowPay("new");setActiveTab("payments");}}>💵 Pay</Btn>}
+                      {canPost&&<Btn size="sm" variant="outline" onClick={()=>{setEditOwner(o);setOwnerForm({name:o.name,phone:o.phone||"",vehicles:o.vehicles||""});}}>✏ Edit</Btn>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── PAYMENTS TAB ── */}
+      {activeTab==="payments"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {(showPay==="new")&&(
+            <div style={{...sh.card,border:`2px solid ${C.green}44`}}>
+              <div style={{fontWeight:800,color:C.green,marginBottom:12,fontSize:15}}>💵 Pay Lorry Owner</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+                <Field label="Date"><input type="date" value={payForm.date} onChange={e=>setPayForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
+                <Field label="Lorry Owner *">
+                  <select value={payForm.ownerId} onChange={e=>{setPayForm(f=>({...f,ownerId:e.target.value}));}} style={{...sh.input,borderColor:!payForm.ownerId?"#f97316":C.border}}>
+                    <option value="">— Select Owner —</option>
+                    {lorryOwners.map(o=><option key={o.id} value={o.id}>{o.name} (Pending: {fmt(ownerBalance(o.id))})</option>)}
+                  </select>
+                </Field>
+                <Field label="Amount (₹)">
+                  <input type="number" value={payForm.amount} onChange={e=>setPayForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" style={sh.input} autoFocus/>
+                </Field>
+                <Field label="Payment Mode">
+                  <select value={payForm.paymentMode} onChange={e=>setPayForm(f=>({...f,paymentMode:e.target.value}))} style={sh.input}>
+                    <option value="cash">Cash</option>
+                    <option value="yercaud_cash">Yercaud Cash</option>
+                    <option value="bank">Bank / UPI</option>
+                  </select>
+                </Field>
+                <Field label="Pay From Account">
+                  <select value={payForm.paymentAccount} onChange={e=>setPayForm(f=>({...f,paymentAccount:e.target.value}))} style={sh.input}>
+                    {cashBankAccounts.map(a=><option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>)}
+                  </select>
+                </Field>
+                <Field label="Narration"><input value={payForm.narration} onChange={e=>setPayForm(f=>({...f,narration:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+              </div>
+              {payErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{payErr}</div>}
+              <div style={{display:"flex",gap:10,marginTop:14}}>
+                <Btn onClick={submitPayment} variant="success" size="lg">✓ Record Payment</Btn>
+                <Btn onClick={()=>{setShowPay(null);setPayErr("");}} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          )}
+          {/* Payment history */}
+          {lorryPayments.length===0?(
+            <div style={{...sh.card,textAlign:"center",color:C.muted,padding:32}}><div style={{fontSize:32,marginBottom:8}}>💵</div>No payments made yet.</div>
+          ):lorryPayments.map((p,i)=>{
+            const owner=lorryOwners.find(o=>o.id===p.ownerId);
+            return(
+              <div key={p.id} style={{...sh.card,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:14}}>{owner?.name||"—"}</div>
+                  <div style={{fontSize:12,color:C.muted}}>{p.date} · {p.paymentMode} · {p.narration||""}</div>
+                </div>
+                <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:C.green}}>{fmt(p.amount)}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── RENTALS TAB ── */}
+      {activeTab==="rentals"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:16}}>
+          {showForm&&(
+            <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
+              <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>🚛 New Lorry Rental</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+                <Field label="Date"><input type="date" value={form.date} onChange={e=>setF("date",e.target.value)} style={sh.input}/></Field>
+                <Field label="Lorry Owner *">
+                  <select value={form.lorryOwnerId} onChange={e=>{setF("lorryOwnerId",e.target.value);const o=lorryOwners.find(x=>x.id===e.target.value);if(o?.vehicles){const v=o.vehicles.split(",")[0].trim();setF("vehicleNo",v);}}} style={{...sh.input,borderColor:!form.lorryOwnerId?"#f97316":C.border}}>
+                    <option value="">— Select Owner —</option>
+                    {lorryOwners.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Vehicle Number *"><input value={form.vehicleNo} onChange={e=>setF("vehicleNo",e.target.value)} placeholder="TN-XX-X-XXXX" style={sh.input}/></Field>
+                <Field label="From"><input value={form.fromLocation} onChange={e=>setF("fromLocation",e.target.value)} placeholder="e.g. Yercaud" style={sh.input}/></Field>
+                <Field label="To"><input value={form.toLocation} onChange={e=>setF("toLocation",e.target.value)} placeholder="e.g. Pattiveeranpatti" style={sh.input}/></Field>
+                <Field label="Rate Basis">
+                  <select value={form.unit} onChange={e=>setF("unit",e.target.value)} style={sh.input}>
+                    <option value="trip">Per Trip (flat)</option>
+                    <option value="bags">Per Bag</option>
+                    <option value="kg">Per KG</option>
+                  </select>
+                </Field>
+                {form.unit==="bags"&&<Field label="No. of Bags"><input type="number" value={form.bags} onChange={e=>setF("bags",e.target.value)} placeholder="0" style={sh.input}/></Field>}
+                {form.unit==="kg"&&<Field label="Weight (KG)"><input type="number" value={form.weightKg} onChange={e=>setF("weightKg",e.target.value)} placeholder="0" style={sh.input}/></Field>}
+                <Field label="Rate (₹)"><input type="number" value={form.rate} onChange={e=>setF("rate",e.target.value)} placeholder="0.00" style={sh.input}/></Field>
+                <Field label="Amount (₹)"><input value={form.amount} readOnly style={{...sh.input,background:"#f0fdf4",fontWeight:800,color:C.green}}/></Field>
+                <Field label="Linked To">
+                  <select value={form.linkedTo} onChange={e=>setF("linkedTo",e.target.value)} style={sh.input}>
+                    <option value="standalone">Standalone</option>
+                    <option value="grn">GRN</option>
+                    <option value="sale">Sale</option>
+                    <option value="transfer">Transfer</option>
+                  </select>
+                </Field>
+                {form.linkedTo!=="standalone"&&<Field label={`${form.linkedTo.toUpperCase()} ID`}><input value={form.linkedId} onChange={e=>setF("linkedId",e.target.value)} placeholder="e.g. GRN-0001" style={sh.input}/></Field>}
+                <Field label="Who Bears Cost?">
+                  <select value={form.whoBearsIt} onChange={e=>setF("whoBearsIt",e.target.value)} style={sh.input}>
+                    <option value="company">Company</option>
+                    <option value="party">Party</option>
+                  </select>
+                </Field>
+                {form.whoBearsIt==="party"&&(
+                  <Field label="Party">
+                    <select value={form.partyId} onChange={e=>setF("partyId",e.target.value)} style={{...sh.input,borderColor:!form.partyId?"#f97316":C.border}}>
+                      <option value="">— Select Party —</option>
+                      {parties.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </Field>
+                )}
+                <Field label="Narration"><input value={form.narration} onChange={e=>setF("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
+              </div>
+              {parseFloat(form.amount||0)>0&&(
+                <div style={{marginTop:12,padding:"10px 14px",background:"#f5ede4",borderRadius:8,fontSize:12}}>
+                  <strong>Entry: </strong>
+                  {form.whoBearsIt==="company"
+                    ? <>Dr <strong>Lorry Expense</strong> → Cr <strong>{lorryOwners.find(o=>o.id===form.lorryOwnerId)?.name||"Owner"} Payable</strong> · {fmt(form.amount)}</>
+                    : <>Dr <strong>{state.parties[form.partyId]?.name||"Party"}</strong> → Cr <strong>{lorryOwners.find(o=>o.id===form.lorryOwnerId)?.name||"Owner"} Payable</strong> · {fmt(form.amount)}</>}
+                </div>
+              )}
+              {formErr&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:"8px",background:"#fee2e2",borderRadius:6}}>{formErr}</div>}
+              <div style={{display:"flex",gap:10,marginTop:14}}>
+                <Btn onClick={submitRental} variant="success" size="lg">✓ Save Rental</Btn>
+                <Btn onClick={()=>{setShowForm(false);setFormErr("");}} variant="ghost">Cancel</Btn>
+              </div>
+            </div>
+          )}
+
+          {lorryRentals.length===0?(
+            <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}><div style={{fontSize:40,marginBottom:8}}>🚛</div>No lorry rentals recorded yet.</div>
+          ):(
+            <div style={{...sh.card,padding:0,overflow:"hidden"}}>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",minWidth:600}}>
+                  <thead><tr style={{background:"#f5ede4"}}>
+                    <th style={sh.th}>ID</th><th style={sh.th}>Date</th><th style={sh.th}>Owner</th>
+                    <th style={sh.th}>Vehicle</th><th style={sh.th}>Route</th>
+                    <th style={sh.th}>Linked</th><th style={sh.th}>Bears</th>
+                    <th style={{...sh.th,textAlign:"right"}}>Amount</th>
+                    {canDelete&&<th style={{...sh.th,width:36}}></th>}
+                  </tr></thead>
+                  <tbody>{lorryRentals.map((r,i)=>{
+                    const owner=lorryOwners.find(o=>o.id===r.lorryOwnerId);
+                    const party=state.parties[r.partyId];
+                    return(
+                      <tr key={r.id} style={{background:i%2===0?C.surface:C.cream}}>
+                        <td style={{...sh.td,fontFamily:"monospace",fontSize:11,fontWeight:700,color:C.accent}}>{r.id}</td>
+                        <td style={sh.td}>{r.date}</td>
+                        <td style={{...sh.td,fontWeight:600}}>{owner?.name||"—"}</td>
+                        <td style={{...sh.td,fontSize:12,fontFamily:"monospace"}}>{r.vehicleNo}</td>
+                        <td style={{...sh.td,fontSize:12,color:C.muted}}>{r.fromLocation&&r.toLocation?`${r.fromLocation} → ${r.toLocation}`:"—"}</td>
+                        <td style={{...sh.td,fontSize:11,color:C.muted}}>{r.linkedTo!=="standalone"?`${r.linkedTo.toUpperCase()} ${r.linkedId}`:"—"}</td>
+                        <td style={sh.td}>
+                          {r.whoBearsIt==="company"
+                            ? <span style={{fontSize:11,background:"#fef3c7",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:600}}>Company</span>
+                            : <span style={{fontSize:11,background:"#eff6ff",color:C.blue,padding:"2px 8px",borderRadius:10,fontWeight:600}}>{party?.name||"Party"}</span>}
+                        </td>
+                        <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.accent}}>{fmt(r.amount)}</td>
+                        {canDelete&&<td style={{...sh.td,textAlign:"center"}}>
+                          <button onClick={()=>setConfirmRentalId(r.id)} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14}}>🗑</button>
+                        </td>}
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── APP ───────────────────────────────────────────────────────────
 const NAV=[
   {id:"dashboard", label:"Dashboard",    icon:"🏠"},
   {id:"grn",       label:"Purchase GRN", icon:"📋"},
-  {id:"transfer",  label:"Stock Transfer",icon:"🚛", branchVisible:true},
+  {id:"yercaud",   label:"Yercaud Payments",icon:"🌿"},
+  {id:"loadman",   label:"Loadman Charges", icon:"👷"},
+  {id:"lorry",     label:"Lorry Rental",    icon:"🚛"},
+  {id:"transfer",  label:"Stock Transfer",  icon:"↔️", branchVisible:true},
+  {id:"drying",    label:"Drying",       icon:"🌡️",  branchHidden:true},
   {id:"hulling",   label:"Hulling",      icon:"⚙️",  branchHidden:true},
   {id:"sales",     label:"Sales",        icon:"🏷",   branchHidden:true},
   {id:"storage",   label:"Party Storage",icon:"🏭",   branchHidden:true},
@@ -3507,6 +5041,7 @@ const NAV=[
   {id:"stock",     label:"Stock",        icon:"☕"},
   {id:"parties",   label:"Parties",      icon:"👥"},
   {id:"accounts",  label:"Accounts",     icon:"🗂",   branchHidden:true},
+  {id:"opening",   label:"Opening Balance",icon:"🏦", adminOnly:true},
   {id:"masters",   label:"Masters",      icon:"🗂️", adminOnly:true},
   {id:"users",     label:"Users",        icon:"👤", adminOnly:true},
 ];
@@ -3534,6 +5069,12 @@ export default function App() {
   const [hullingJobs,  setHullingJobs]  = useState([]);
   const [sales,        setSales]        = useState([]);
   const [transfers,    setTransfers]    = useState([]);
+  const [yercaudPayments, setYercaudPayments] = useState([]);
+  const [loadmanCharges, setLoadmanCharges]   = useState([]);
+  const [loadmanRates,   setLoadmanRates]     = useState([]);
+  const [lorryOwners,    setLorryOwners]      = useState([]);
+  const [lorryRentals,   setLorryRentals]     = useState([]);
+  const [lorryPayments,  setLorryPayments]    = useState([]);
 
   // Compute stock from vouchers (no separate stock table needed)
   const stock = useMemo(() => {
@@ -3616,11 +5157,13 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      const [accs, parts, vouchs, sitems, grnList, userList, whs, locs, ctypes, dryList, storList, relList, hullList, salesList, transferList] = await Promise.all([
+      const [accs, parts, vouchs, sitems, grnList, userList, whs, locs, ctypes, dryList, storList, relList, hullList, salesList, transferList, yercaudList, ldCharges, ldRates, lorryOwnerList, lorryRentalList, lorryPayList] = await Promise.all([
         db.getAccounts(), db.getParties(), db.getVouchers(), db.getStockItems(),
         db.getGRNs(), db.getUsers(), db.getWarehouses(), db.getLocations(),
         db.getCoffeeTypes(), db.getDryingJobs(), db.getStorageLots(),
         db.getStorageReleases(), db.getHullingJobs(), db.getSales(), db.getTransfers(),
+        db.getYercaudPayments(), db.getLoadmanCharges(), db.getLoadmanRates(),
+        db.getLorryOwners(), db.getLorryRentals(), db.getLorryPayments(),
       ]);
       // Columns are now camelCase in DB after migration
       const accsObj = {};
@@ -3657,6 +5200,12 @@ export default function App() {
       setHullingJobs(hullList||[]);
       setSales(salesList||[]);
       setTransfers(transferList||[]);
+      setYercaudPayments(yercaudList||[]);
+      setLoadmanCharges(ldCharges||[]);
+      setLoadmanRates(ldRates||[]);
+      setLorryOwners(lorryOwnerList||[]);
+      setLorryRentals(lorryRentalList||[]);
+      setLorryPayments(lorryPayList||[]);
     } catch(e) {
       setError("Failed to load data: " + e.message);
     }
@@ -3689,7 +5238,8 @@ export default function App() {
   const state = {
     accounts: accurateAccounts, parties, vouchers, stockItems, grns, users, stock,
     warehouses, locations, coffeeTypes, dryingJobs, storageLots, storageReleases,
-    hullingJobs, sales, transfers,
+    hullingJobs, sales, transfers, yercaudPayments,
+    loadmanCharges, loadmanRates, lorryOwners, lorryRentals, lorryPayments,
     nextVoucherNo:{RV:1,PV:1,CV:1,JV:1,SV:1,PuV:1},
     nextId:1, nextGRN:1,
   };
@@ -4101,12 +5651,270 @@ export default function App() {
           }
           break;
         }
+
+        // ── OPENING BALANCES ───────────────────────────────────────
+        case "POST_OPENING_BALANCES": {
+          const { date, balances } = action;
+          const entries = [];
+          // Collect all balance entries
+          Object.entries(balances).forEach(([key, val]) => {
+            const amount = parseFloat(val||0);
+            if (!amount) return;
+            if (key.startsWith("sup_")) {
+              // Supplier — we owe them → Cr Supplier (liability increases)
+              const partyId = key.replace("sup_","");
+              entries.push({accountId: partyId, dr:0, cr:amount, narration:"Opening balance"});
+            } else if (key.startsWith("cus_")) {
+              // Customer — they owe us → Dr Customer (asset increases)
+              const partyId = key.replace("cus_","");
+              entries.push({accountId: partyId, dr:amount, cr:0, narration:"Opening balance"});
+            } else if (!key.startsWith("dir_")) {
+              // Regular account
+              const acc = accounts[key];
+              if (!acc) return;
+              const dir = balances[`dir_${key}`]||"normal";
+              const isDebitNormal = ["asset","expense"].includes(acc.type);
+              const isDebit = (isDebitNormal && dir==="normal") || (!isDebitNormal && dir==="reverse");
+              entries.push({accountId: key, dr:isDebit?amount:0, cr:isDebit?0:amount, narration:"Opening balance"});
+            }
+          });
+          if (!entries.length) break;
+          // Balancing entry — Opening Balance Equity
+          const totalDr = entries.reduce((s,e)=>s+parseFloat(e.dr||0),0);
+          const totalCr = entries.reduce((s,e)=>s+parseFloat(e.cr||0),0);
+          const diff = totalDr - totalCr;
+          if (Math.abs(diff)>0.01) {
+            // Ensure opening equity account exists
+            const eqId = "opening_balance_equity";
+            if (!accounts[eqId]) {
+              await db.addAccount({id:eqId, name:"Opening Balance Equity", group:"Capital", type:"liability", balance:0});
+            }
+            entries.push({accountId:eqId, dr:diff<0?Math.abs(diff):0, cr:diff>0?diff:0, narration:"Opening balance equity"});
+          }
+          const vSeq = await db.getSeq("JV");
+          const vId = `JV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("JV", vSeq);
+          await db.addVoucher({id:vId, voucherType:"JV", date, narration:"Opening Balances", reference:"OPENING", entries, items:[]});
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
+
+        // ── LOADMAN ────────────────────────────────────────────────
+        case "SAVE_LOADMAN_RATE": {
+          const d = action.data;
+          if (d.id) {
+            await db.updateLoadmanRate(d.id, {serviceType:d.serviceType, rate:d.rate, unit:d.unit});
+          } else {
+            await db.saveLoadmanRate({id:"rate_"+Date.now(), serviceType:d.serviceType, rate:d.rate, unit:d.unit});
+          }
+          break;
+        }
+        case "ADD_LOADMAN_CHARGE": {
+          const d = action.data;
+          const seq = await db.getLoadmanSeq().catch(()=>1);
+          const id = `LDM-${String(seq).padStart(4,"0")}`;
+          await db.incLoadmanSeq(seq).catch(()=>{});
+          await db.addLoadmanCharge({id, ...d});
+          // Ensure accounts exist
+          if (!accounts[LOADMAN_PAYABLE_ID]) {
+            await db.addAccount({id:LOADMAN_PAYABLE_ID, name:"Loadman Payable", group:"Creditors", type:"liability", balance:0});
+          }
+          if (d.whoBearsIt==="company" && !accounts[LOADMAN_EXPENSE_ID]) {
+            await db.addAccount({id:LOADMAN_EXPENSE_ID, name:"Loadman Expense", group:"Expenses", type:"expense", balance:0});
+          }
+          const vSeq = await db.getSeq("JV");
+          const vId = `JV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("JV", vSeq);
+          let entries;
+          if (d.whoBearsIt==="company") {
+            entries = [
+              {accountId:LOADMAN_EXPENSE_ID, dr:d.amount, cr:0, narration:`Loadman - ${d.serviceType} - ${id}`},
+              {accountId:LOADMAN_PAYABLE_ID, dr:0, cr:d.amount, narration:`Loadman payable - ${id}`},
+            ];
+          } else {
+            entries = [
+              {accountId:d.partyId,          dr:d.amount, cr:0, narration:`Loadman charges - ${d.serviceType} - ${id}`},
+              {accountId:LOADMAN_PAYABLE_ID, dr:0, cr:d.amount, narration:`Loadman payable - ${id}`},
+            ];
+          }
+          await db.addVoucher({id:vId, voucherType:"JV", date:d.date, narration:`Loadman - ${d.serviceType}${d.linkedId?` (${d.linkedId})`:""}`, reference:id, entries, items:[]});
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
+        case "DELETE_LOADMAN_CHARGE": {
+          const linked = vouchers.find(v=>v.reference===action.id&&v.voucherType==="JV");
+          if (linked) { await db.applyEntries(accounts, linked.entries||[], -1); await db.deleteVoucher(linked.id); }
+          await db.deleteLoadmanCharge(action.id);
+          break;
+        }
+        case "PAY_LOADMAN": {
+          const d = action.data;
+          if (!accounts[LOADMAN_PAYABLE_ID]) {
+            await db.addAccount({id:LOADMAN_PAYABLE_ID, name:"Loadman Payable", group:"Creditors", type:"liability", balance:0});
+          }
+          const vSeq = await db.getSeq("PV");
+          const vId = `PV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("PV", vSeq);
+          const entries = [
+            {accountId:LOADMAN_PAYABLE_ID,  dr:d.amount, cr:0,        narration:`Loadman payment`},
+            {accountId:d.paymentAccount,    dr:0,        cr:d.amount, narration:`Loadman payment`},
+          ];
+          await db.addVoucher({id:vId, voucherType:"PV", date:d.date, narration:`Loadman payment - ${d.narration||""}`, reference:"", entries, items:[]});
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
+
+        // ── LORRY OWNERS ───────────────────────────────────────────
+        case "ADD_LORRY_OWNER": {
+          const id = "lorry_owner_"+Date.now();
+          await db.addLorryOwner({id, ...action.data});
+          // Create payable account for this owner
+          const accId = LORRY_PAYABLE_PREFIX + id;
+          await db.addAccount({id:accId, name:`${action.data.name} (Lorry Payable)`, group:"Creditors", type:"liability", balance:0});
+          break;
+        }
+        case "EDIT_LORRY_OWNER": {
+          await db.editLorryOwner(action.id, action.data);
+          // Update account name
+          const accId = LORRY_PAYABLE_PREFIX + action.id;
+          if (accounts[accId]) {
+            await sb("PATCH","cv_accounts",{body:{name:`${action.data.name} (Lorry Payable)`},q:`?id=eq.${accId}`});
+          }
+          break;
+        }
+
+        // ── LORRY RENTALS ──────────────────────────────────────────
+        case "ADD_LORRY_RENTAL": {
+          const d = action.data;
+          const seq = await db.getLorrySeq().catch(()=>1);
+          const id = `LRY-${String(seq).padStart(4,"0")}`;
+          await db.incLorrySeq(seq).catch(()=>{});
+          await db.addLorryRental({id, ...d});
+          // Ensure lorry expense account exists
+          if (!accounts[LORRY_EXPENSE_ID]) {
+            await db.addAccount({id:LORRY_EXPENSE_ID, name:"Lorry Expense", group:"Expenses", type:"expense", balance:0});
+          }
+          const ownerAccId = LORRY_PAYABLE_PREFIX + d.lorryOwnerId;
+          const vSeq = await db.getSeq("JV");
+          const vId = `JV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("JV", vSeq);
+          let entries;
+          const ownerName = state.lorryOwners?.find(o=>o.id===d.lorryOwnerId)?.name||"Lorry Owner";
+          if (d.whoBearsIt==="company") {
+            entries = [
+              {accountId:LORRY_EXPENSE_ID, dr:d.amount, cr:0,        narration:`Lorry rental - ${d.vehicleNo} - ${id}`},
+              {accountId:ownerAccId,       dr:0,        cr:d.amount, narration:`${ownerName} payable - ${id}`},
+            ];
+          } else {
+            entries = [
+              {accountId:d.partyId,  dr:d.amount, cr:0,        narration:`Lorry rental charged - ${d.vehicleNo} - ${id}`},
+              {accountId:ownerAccId, dr:0,        cr:d.amount, narration:`${ownerName} payable - ${id}`},
+            ];
+          }
+          await db.addVoucher({id:vId, voucherType:"JV", date:d.date, narration:`Lorry rental ${d.vehicleNo}${d.linkedId?` (${d.linkedId})`:""}`, reference:id, entries, items:[]});
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
+        case "DELETE_LORRY_RENTAL": {
+          const linked = vouchers.find(v=>v.reference===action.id&&v.voucherType==="JV");
+          if (linked) { await db.applyEntries(accounts, linked.entries||[], -1); await db.deleteVoucher(linked.id); }
+          await db.deleteLorryRental(action.id);
+          break;
+        }
+        case "PAY_LORRY_OWNER": {
+          const d = action.data;
+          const ownerAccId = LORRY_PAYABLE_PREFIX + d.ownerId;
+          const seq = await db.getLorryPaySeq().catch(()=>1);
+          const id = `LPY-${String(seq).padStart(4,"0")}`;
+          await db.incLorryPaySeq(seq).catch(()=>{});
+          await db.addLorryPayment({id, ...d});
+          const vSeq = await db.getSeq("PV");
+          const vId = `PV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("PV", vSeq);
+          const entries = [
+            {accountId:ownerAccId,       dr:d.amount, cr:0,        narration:`Lorry payment - ${id}`},
+            {accountId:d.paymentAccount, dr:0,        cr:d.amount, narration:`Lorry payment - ${id}`},
+          ];
+          await db.addVoucher({id:vId, voucherType:"PV", date:d.date, narration:`Lorry payment to ${state.lorryOwners?.find(o=>o.id===d.ownerId)?.name||d.ownerId}`, reference:id, entries, items:[]});
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
+
         case "ADD_QUALITY_REPORT":
           await db.addQuality(action.grnId, action.report); break;
         case "DELETE_GRN":
           await db.deleteGRN(action.id); break;
 
-        default: break;
+        // ── YERCAUD PAYMENTS ────────────────────────────────────
+        case "FUND_YERCAUD_CASH": {
+          // Contra: Dr Yercaud Cash, Cr Source Account
+          const d = action.data;
+          const vSeq = await db.getSeq("CV");
+          const vId = `CV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("CV", vSeq);
+          // Ensure Yercaud Cash account exists
+          const yercaudExists = accounts[YERCAUD_CASH_ID];
+          if (!yercaudExists) {
+            await db.addAccount({
+              id: YERCAUD_CASH_ID, name:"Yercaud Cash",
+              group:"Cash & Bank", type:"asset", balance:0,
+              isBankAccount:false,
+            });
+          }
+          const entries = [
+            { accountId: YERCAUD_CASH_ID,   dr: d.amount, cr: 0,        narration: d.narration||"Yercaud cash funding" },
+            { accountId: d.fromAccount,      dr: 0,        cr: d.amount, narration: d.narration||"Yercaud cash funding" },
+          ];
+          await db.addVoucher({ id:vId, voucherType:"CV", date:d.date, narration: d.narration||`Funds transferred to Yercaud Cash`, reference:"", entries, items:[] });
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
+
+        case "ADD_YERCAUD_PAYMENT": {
+          const d = action.data;
+          // Get sequence
+          let seq;
+          try { seq = await db.getYercaudSeq(); }
+          catch(e) { seq = (yercaudPayments.length||0) + 1; }
+          const id = `YPV-${String(seq).padStart(4,"0")}`;
+          try { await db.incYercaudSeq(seq); } catch(e) {}
+
+          // Ensure Yercaud Cash account exists
+          const yercaudExists = accounts[YERCAUD_CASH_ID];
+          if (!yercaudExists) {
+            await db.addAccount({
+              id: YERCAUD_CASH_ID, name:"Yercaud Cash",
+              group:"Cash & Bank", type:"asset", balance:0,
+              isBankAccount:false,
+            });
+          }
+
+          await db.addYercaudPayment({ id, ...d });
+
+          // Post payment voucher: Dr Supplier (reduces payable), Cr Yercaud Cash
+          const creditAccount = d.paymentMode==="cash" ? YERCAUD_CASH_ID : (d.bankAccountId||"cash");
+          const vSeq = await db.getSeq("PV");
+          const vId = `PV-${String(vSeq).padStart(4,"0")}`;
+          await db.incSeq("PV", vSeq);
+          const entries = [
+            { accountId: d.partyId,       dr: d.amount, cr: 0,        narration: d.narration||`Yercaud advance - ${id}` },
+            { accountId: creditAccount,   dr: 0,        cr: d.amount, narration: d.narration||`Yercaud advance - ${id}` },
+          ];
+          await db.addVoucher({ id:vId, voucherType:"PV", date:d.date, narration:`Yercaud payment to ${state.parties[d.partyId]?.name||d.partyId} - ${id}`, reference:id, entries, items:[] });
+          await db.applyEntries(accounts, entries, 1);
+          break;
+        }
+
+        case "DELETE_YERCAUD_PAYMENT": {
+          // Find and reverse the linked PV voucher
+          const linkedVoucher = vouchers.find(v => v.reference===action.id && v.voucherType==="PV");
+          if (linkedVoucher) {
+            await db.applyEntries(accounts, linkedVoucher.entries||[], -1);
+            await db.deleteVoucher(linkedVoucher.id);
+          }
+          await db.deleteYercaudPayment(action.id);
+          break;
+        }
       }
       // Refresh all data after every action
       await loadAll();
@@ -4214,7 +6022,12 @@ export default function App() {
         )}
         {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch}/>}
         {tab==="grn"       && <GRNModule      state={{...state, grns: isBranch ? state.grns.filter(g=>g.location===userLoc||!g.location) : state.grns}} dispatch={dispatch} role={role} currentUser={currentUser}/>}
+        {tab==="yercaud"   && <YercaudModule  state={state} dispatch={dispatch} role={role}/>}
+        {tab==="loadman"   && <LoadmanModule  state={state} dispatch={dispatch} role={role}/>}
+        {tab==="lorry"     && <LorryModule    state={state} dispatch={dispatch} role={role}/>}
+        {tab==="opening"   && <OpeningBalanceModule state={state} dispatch={dispatch}/>}
         {tab==="transfer"  && <StockTransferModule state={state} dispatch={dispatch} role={role} currentUser={currentUser}/>}
+        {tab==="drying"    && <DryingModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="hulling"   && <HullingModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="sales"     && <SalesModule    state={state} dispatch={dispatch} role={role}/>}
         {tab==="storage"   && <StorageModule  state={state} dispatch={dispatch} role={role}/>}
