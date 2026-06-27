@@ -2070,10 +2070,15 @@ const needsQualityForGRN = (g) => {
 };
 
 // ── GRN FORM ──────────────────────────────────────────────────────
-function GRNForm({ state, dispatch, onDone, initial, editId }) {
+function GRNForm({ state, dispatch, onDone, initial, editId, role, currentUser }) {
+  const isBranch       = role === "branch";
+  const branchLocation = "Yercaud";
   const locationsList  = state.locations?.length  ? state.locations.map(l=>l.name)  : ["Pattiveeranpatti","Yercaud"];
   const warehousesList = state.warehouses?.length ? state.warehouses.map(w=>w.name) : ["Own Yard","Mechanical Dryer"];
   const suppliers      = Object.values(state.parties).filter(p=>p.partyType==="supplier");
+
+  // Branch users always get Yercaud as location
+  const defaultLocation = isBranch ? branchLocation : (locationsList[0]||"Pattiveeranpatti");
 
   const blank = {
     date:today(), partyId:"", coffeeType:"Wet Parchment",
@@ -2085,7 +2090,7 @@ function GRNForm({ state, dispatch, onDone, initial, editId }) {
     // weight bridge
     firstWeight:"", secondWeight:"", rejectedBags:"",
     // location
-    location:locationsList[0]||"Pattiveeranpatti",
+    location:defaultLocation,
     warehouse:warehousesList[0]||"Own Yard",
     warehouseZone:"", stockNo:"", truckNo:"", cropSeason:"25/26",
     remarks:"", narration:"",
@@ -2206,9 +2211,13 @@ function GRNForm({ state, dispatch, onDone, initial, editId }) {
             </select>
           </Field>
           <Field label="Location">
-            <select value={form.location} onChange={e=>set("location",e.target.value)} style={sh.input}>
-              {locationsList.map(l=><option key={l} value={l}>{l}</option>)}
-            </select>
+            {isBranch ? (
+              <input value={branchLocation} readOnly style={{...sh.input,background:"#f0fdf4",color:C.green,fontWeight:700,cursor:"not-allowed"}}/>
+            ) : (
+              <select value={form.location} onChange={e=>set("location",e.target.value)} style={sh.input}>
+                {locationsList.map(l=><option key={l} value={l}>{l}</option>)}
+              </select>
+            )}
           </Field>
           <Field label="Narration"><input value={form.narration} onChange={e=>set("narration",e.target.value)} placeholder="Optional" style={sh.input}/></Field>
         </div>
@@ -2922,7 +2931,7 @@ function GRNModule({ state, dispatch, role }) {
       {showForm&&(
         <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
           <div style={{fontWeight:800,color:C.accent,marginBottom:16,fontSize:16}}>{editGRN?`✏ Edit GRN — ${editGRN.id}`:"📋 New Goods Receipt Note"}</div>
-          <GRNForm state={state} dispatch={dispatch} initial={editGRN||undefined} editId={editGRN?.id} onDone={()=>{setShowForm(false);setEditGRN(null);}}/>
+          <GRNForm state={state} dispatch={dispatch} initial={editGRN||undefined} editId={editGRN?.id} role={role} currentUser={currentUser} onDone={()=>{setShowForm(false);setEditGRN(null);}}/>
         </div>
       )}
 
@@ -4125,11 +4134,12 @@ function StockTransferModule({ state, dispatch, role, currentUser }) {
   const canDelete  = ROLES[role]?.canDelete;
   const set = (f,v) => setForm(p=>({...p,[f]:v}));
 
-  // Branch sees GRNs from their location not yet transferred
-  const transferredGrnIds = new Set((state.transfers||[]).map(t=>t.grnId));
+  // Branch sees GRNs from their location not yet fully transferred (accepted)
+  const acceptedTransferGrnIds = new Set((state.transfers||[]).filter(t=>t.status==="accepted").map(t=>t.grnId));
+  const pendingTransferGrnIds  = new Set((state.transfers||[]).filter(t=>t.status==="pending").map(t=>t.grnId));
   const eligibleGRNs = state.grns.filter(g => {
-    if (isBranch && (g.location||"hq")!==userLoc) return false;
-    if (transferredGrnIds.has(g.id)) return false;
+    if (isBranch && (g.location||"").toLowerCase() !== (userLoc||"").toLowerCase()) return false;
+    if (acceptedTransferGrnIds.has(g.id)) return false; // already accepted at HQ
     return true;
   });
 
@@ -4198,7 +4208,8 @@ function StockTransferModule({ state, dispatch, role, currentUser }) {
                 {eligibleGRNs.map(g=>{
                   const party=state.parties[g.partyId];
                   const qty=parseFloat(g.dryKg||g.netWeight||0);
-                  return <option key={g.id} value={g.id}>{g.id} · {party?.name||"?"} · {g.coffeeType} · {qty}kg</option>;
+                  const isPending = pendingTransferGrnIds.has(g.id);
+                  return <option key={g.id} value={g.id}>{g.id} · {party?.name||"?"} · {g.coffeeType} · {qty}kg{isPending?" ⏳ Transfer Pending":""}</option>;
                 })}
               </select>
             </Field>
@@ -6844,7 +6855,7 @@ export default function App() {
           </div>
         )}
         {tab==="dashboard" && <Dashboard      state={state} dispatch={dispatch} setTab={setTab} role={role}/>}
-        {tab==="grn"       && <GRNModule      state={{...state, grns: isBranch ? state.grns.filter(g=>g.location===userLoc||!g.location) : state.grns}} dispatch={dispatch} role={role} currentUser={currentUser}/>}
+        {tab==="grn"       && <GRNModule      state={{...state, grns: isBranch ? state.grns.filter(g=>(g.location||"").toLowerCase()===(userLoc||"").toLowerCase()||!g.location) : state.grns}} dispatch={dispatch} role={role} currentUser={currentUser}/>}
         {tab==="yercaud"   && <YercaudErrorBoundary><YercaudModule  state={state} dispatch={dispatch} role={role}/></YercaudErrorBoundary>}
         {tab==="loadman"   && <LoadmanModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="lorry"     && <LorryModule    state={state} dispatch={dispatch} role={role}/>}
