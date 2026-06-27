@@ -2705,7 +2705,7 @@ ${fromDate||toDate?`<div class="period">📅 Period: ${fromDate||"Beginning"} �
 }
 
 // ── GRN MODULE ────────────────────────────────────────────────────
-function GRNModule({ state, dispatch, role }) {
+function GRNModule({ state, dispatch, role, currentUser }) {
   const [showForm,setShowForm]               = useState(false);
   const [editGRN,setEditGRN]                 = useState(null);
   const [showQuality,setShowQuality]         = useState(null);
