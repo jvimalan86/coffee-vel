@@ -1186,9 +1186,31 @@ function StockView({ state, dispatch, role, currentUser }) {
 }
 
 // ── ACCOUNTS MASTER ───────────────────────────────────────────────
+// Inline CC limit editor for bank account cards
+function CCLimitEditor({ account, dispatch }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(account.creditLimit||0);
+  if (!editing) return (
+    <Btn size="sm" variant="outline" onClick={()=>{setVal(account.creditLimit||0);setEditing(true);}}>
+      {parseFloat(account.creditLimit||0)>0?`✏ Limit: ${fmt(account.creditLimit)}`:"+ Set CC Limit"}
+    </Btn>
+  );
+  return (
+    <div style={{display:"flex",gap:6,alignItems:"center"}}>
+      <input type="number" value={val} onChange={e=>setVal(e.target.value)}
+        style={{...sh.input,width:120,padding:"3px 8px",fontSize:12}} placeholder="CC Limit ₹"/>
+      <Btn size="sm" variant="success" onClick={()=>{
+        dispatch({type:"EDIT_ACCOUNT_LIMIT",id:account.id,creditLimit:parseFloat(val||0)});
+        setEditing(false);
+      }}>✓</Btn>
+      <Btn size="sm" variant="ghost" onClick={()=>setEditing(false)}>✕</Btn>
+    </div>
+  );
+}
+
 function AccountsMaster({ state, dispatch }) {
   const [form,setForm]=useState({name:"",group:"Expenses",type:"expense"});
-  const [bankForm,setBankForm]=useState({name:"",accountNo:"",ifsc:"",branch:""});
+  const [bankForm,setBankForm]=useState({name:"",accountNo:"",ifsc:"",branch:"",creditLimit:""});
   const [bankError,setBankError]=useState("");
   const groups=["Cash & Bank","Debtors","Creditors","Income","Expenses","Capital","Other"];
   const typeMap={"Cash & Bank":"asset",Debtors:"asset",Creditors:"liability",Income:"income",Expenses:"expense",Capital:"liability",Other:"asset"};
@@ -1201,8 +1223,9 @@ function AccountsMaster({ state, dispatch }) {
       name:bankForm.name.trim(),group:"Cash & Bank",type:"asset",
       isBankAccount:true,
       accountNo:bankForm.accountNo,ifsc:bankForm.ifsc,branch:bankForm.branch,
+      creditLimit:parseFloat(bankForm.creditLimit||0),
     }});
-    setBankForm({name:"",accountNo:"",ifsc:"",branch:""});
+    setBankForm({name:"",accountNo:"",ifsc:"",branch:"",creditLimit:""});
   };
 
   const add=()=>{
@@ -1223,10 +1246,13 @@ function AccountsMaster({ state, dispatch }) {
       <div style={sh.card}>
         <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>🏦 Add Bank Account</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
-          <Field label="Bank Account Name"><input value={bankForm.name} onChange={e=>setBankForm(f=>({...f,name:e.target.value}))} placeholder="e.g. SBI Current A/C" style={sh.input}/></Field>
+          <Field label="Bank Account Name"><input value={bankForm.name} onChange={e=>setBankForm(f=>({...f,name:e.target.value}))} placeholder="e.g. SBI CC A/C" style={sh.input}/></Field>
           <Field label="Account Number"><input value={bankForm.accountNo} onChange={e=>setBankForm(f=>({...f,accountNo:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
           <Field label="IFSC Code"><input value={bankForm.ifsc} onChange={e=>setBankForm(f=>({...f,ifsc:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
           <Field label="Branch"><input value={bankForm.branch} onChange={e=>setBankForm(f=>({...f,branch:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
+          <Field label="CC / OD Limit (₹) — leave 0 if regular">
+            <input type="number" value={bankForm.creditLimit} onChange={e=>setBankForm(f=>({...f,creditLimit:e.target.value}))} placeholder="e.g. 1600000" style={sh.input}/>
+          </Field>
         </div>
         <div style={{marginTop:14,display:"flex",alignItems:"center",gap:12}}>
           <Btn onClick={addBank} variant="success">+ Add Bank Account</Btn>
@@ -1237,24 +1263,61 @@ function AccountsMaster({ state, dispatch }) {
       {/* Bank accounts list */}
       {bankAccounts.length>0&&(
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
-          {bankAccounts.map(a=>(
-            <div key={a.id} style={{...sh.card,borderLeft:`4px solid ${C.blue}`}}>
-              <div style={{fontSize:20,marginBottom:4}}>{a.id==="cash"?"💵":"🏦"}</div>
+          {bankAccounts.map(a=>{
+            const isCC = parseFloat(a.creditLimit||0) > 0;
+            const limit = parseFloat(a.creditLimit||0);
+            // CC: balance is negative (drawn). drawn = abs(balance). available = limit - drawn
+            const drawn = isCC ? Math.abs(Math.min(a.balance,0)) : 0;
+            const available = isCC ? limit - drawn : 0;
+            const utilPct = isCC ? Math.min(100,(drawn/limit)*100) : 0;
+            return(
+            <div key={a.id} style={{...sh.card,borderLeft:`4px solid ${isCC?"#7c3aed":C.blue}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{fontSize:20,marginBottom:4}}>{a.id==="cash"?"💵":isCC?"💳":"🏦"}</div>
+                {isCC&&<span style={{fontSize:10,background:"#ede9fe",color:"#7c3aed",padding:"2px 8px",borderRadius:10,fontWeight:700}}>CC / OD</span>}
+              </div>
               <div style={{fontWeight:800,fontSize:15,color:C.text}}>{a.name}</div>
               {a.accountNo&&<div style={{fontSize:12,color:C.muted,marginTop:2}}>A/C: {a.accountNo}</div>}
               {a.ifsc&&<div style={{fontSize:12,color:C.muted}}>IFSC: {a.ifsc}</div>}
               {a.branch&&<div style={{fontSize:12,color:C.muted}}>Branch: {a.branch}</div>}
-              <div style={{marginTop:8,fontFamily:"monospace",fontWeight:800,fontSize:17,color:balColor(a)}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
+              {isCC ? (
+                <div style={{marginTop:10}}>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
+                    <div style={{background:"#fee2e2",borderRadius:6,padding:"6px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:10,color:C.red,fontWeight:700}}>DRAWN</div>
+                      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:13,color:C.red}}>{fmt(drawn)}</div>
+                    </div>
+                    <div style={{background:"#dcfce7",borderRadius:6,padding:"6px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:10,color:C.green,fontWeight:700}}>AVAILABLE</div>
+                      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:13,color:C.green}}>{fmt(available)}</div>
+                    </div>
+                    <div style={{background:"#ede9fe",borderRadius:6,padding:"6px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:10,color:"#7c3aed",fontWeight:700}}>LIMIT</div>
+                      <div style={{fontFamily:"monospace",fontWeight:800,fontSize:13,color:"#7c3aed"}}>{fmt(limit)}</div>
+                    </div>
+                  </div>
+                  {/* Utilisation bar */}
+                  <div style={{background:"#e5e7eb",borderRadius:4,height:6,overflow:"hidden"}}>
+                    <div style={{width:`${utilPct}%`,height:"100%",background:utilPct>85?C.red:utilPct>60?"#f97316":C.green,borderRadius:4,transition:"width 0.3s"}}/>
+                  </div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:3,textAlign:"right"}}>{utilPct.toFixed(0)}% utilised</div>
+                </div>
+              ):(
+                <div style={{marginTop:8,fontFamily:"monospace",fontWeight:800,fontSize:17,color:balColor(a)}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
+              )}
               {a.id!=="cash"&&(
-                <div style={{marginTop:8}}>
+                <div style={{marginTop:8,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                  {/* Edit CC limit inline */}
+                  <CCLimitEditor account={a} dispatch={dispatch}/>
                   <Btn size="sm" variant="danger" onClick={async()=>{
                     try { await dispatch({type:"DELETE_ACCOUNT",id:a.id}); }
                     catch(e) { setBankError(e.message); }
-                  }}>🗑 Delete</Btn>
+                  }}>🗑</Btn>
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -1876,13 +1939,36 @@ function Dashboard({ state, setTab, role }) {
             <div style={sh.card}>
               <div style={{fontWeight:800,marginBottom:10}}>🏦 Bank Accounts</div>
               <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-                {bankAccounts.map(a=>(
-                  <div key={a.id} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 16px",minWidth:180}}>
-                    <div style={{fontSize:12,fontWeight:700,color:C.muted}}>{a.name}</div>
-                    {a.accountNo&&<div style={{fontSize:11,color:C.muted}}>A/C: {a.accountNo}</div>}
-                    <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:balColor(a),marginTop:4}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
-                  </div>
-                ))}
+                {bankAccounts.map(a=>{
+                  const isCC = parseFloat(a.creditLimit||0)>0;
+                  const limit = parseFloat(a.creditLimit||0);
+                  const drawn = isCC ? Math.abs(Math.min(a.balance,0)) : 0;
+                  const available = isCC ? limit-drawn : 0;
+                  const utilPct = isCC&&limit>0 ? Math.min(100,(drawn/limit)*100) : 0;
+                  return(
+                    <div key={a.id} style={{background:C.cream,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 16px",minWidth:180}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <div style={{fontSize:12,fontWeight:700,color:C.muted}}>{a.name}</div>
+                        {isCC&&<span style={{fontSize:10,background:"#ede9fe",color:"#7c3aed",padding:"1px 6px",borderRadius:8,fontWeight:700}}>CC</span>}
+                      </div>
+                      {a.accountNo&&<div style={{fontSize:11,color:C.muted}}>A/C: {a.accountNo}</div>}
+                      {isCC ? (
+                        <div style={{marginTop:6}}>
+                          <div style={{display:"flex",gap:10,marginBottom:4,flexWrap:"wrap"}}>
+                            <span style={{fontSize:12}}><span style={{color:C.red,fontWeight:700}}>Drawn </span><span style={{fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(drawn)}</span></span>
+                            <span style={{fontSize:12}}><span style={{color:C.green,fontWeight:700}}>Avail </span><span style={{fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmt(available)}</span></span>
+                          </div>
+                          <div style={{background:"#e5e7eb",borderRadius:4,height:5,overflow:"hidden"}}>
+                            <div style={{width:`${utilPct}%`,height:"100%",background:utilPct>85?C.red:utilPct>60?"#f97316":C.green,borderRadius:4}}/>
+                          </div>
+                          <div style={{fontSize:10,color:C.muted,marginTop:2}}>Limit {fmt(limit)} · {utilPct.toFixed(0)}% used</div>
+                        </div>
+                      ):(
+                        <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:balColor(a),marginTop:4}}>{fmt(Math.abs(a.balance))} {balLabel(a)}</div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -2066,6 +2152,52 @@ function Dashboard({ state, setTab, role }) {
 }
 
 // ── LOGIN ─────────────────────────────────────────────────────────
+// ── REPORTS HUB ───────────────────────────────────────────────────
+function ReportsHub({ state, role }) {
+  const [activeReport, setActiveReport] = useState("daybook");
+  const isBranch = role === "branch";
+
+  const reports = [
+    {id:"daybook",     label:"Day Book",       icon:"📓", branchHidden:true},
+    {id:"pl",          label:"Profit & Loss",  icon:"📈", adminOnly:true},
+    {id:"trial",       label:"Trial Balance",  icon:"⚖️",  branchHidden:true},
+    {id:"outstanding", label:"Outstanding",    icon:"📤", branchHidden:true},
+  ].filter(r=>{
+    if (r.branchHidden && isBranch) return false;
+    if (r.adminOnly && role!=="admin") return false;
+    return true;
+  });
+
+  // If branch and first report is hidden, default to first visible
+  const firstVisible = reports[0]?.id||"daybook";
+  const [report, setReport] = useState(firstVisible);
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:0}}>
+      {/* Report sub-tabs */}
+      <div style={{display:"flex",gap:0,borderBottom:`2px solid ${C.border}`,marginBottom:20,overflowX:"auto"}}>
+        {reports.map(r=>(
+          <button key={r.id} onClick={()=>setReport(r.id)} style={{
+            padding:"10px 20px",border:"none",
+            borderBottom:`3px solid ${report===r.id?C.accent:"transparent"}`,
+            background:"transparent",
+            color:report===r.id?C.accent:C.muted,
+            fontWeight:report===r.id?700:500,
+            fontSize:13,cursor:"pointer",fontFamily:"inherit",
+            whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6,
+          }}>
+            <span>{r.icon}</span>{r.label}
+          </button>
+        ))}
+      </div>
+      {report==="daybook"     && <Daybook       state={state} dispatch={()=>{}} role={role}/>}
+      {report==="pl"          && <ProfitLoss    state={state}/>}
+      {report==="trial"       && <TrialBalance  state={state}/>}
+      {report==="outstanding" && <OutstandingReport state={state}/>}
+    </div>
+  );
+}
+
 function LoginForm({ onLogin, loading, error }) {
   const [username,setUsername]=useState("");
   const [password,setPassword]=useState("");
@@ -5962,29 +6094,49 @@ function LorryModule({ state, dispatch, role }) {
 }
 
 // ── APP ───────────────────────────────────────────────────────────
-const NAV=[
-  {id:"dashboard", label:"Dashboard",    icon:"🏠"},
-  {id:"grn",       label:"Purchase GRN", icon:"📋"},
-  {id:"yercaud",   label:"Yercaud Payments",icon:"🌿"},
-  {id:"loadman",   label:"Loadman Charges", icon:"👷"},
-  {id:"lorry",     label:"Lorry Rental",    icon:"🚛"},
-  {id:"transfer",  label:"Stock Transfer",  icon:"↔️", branchVisible:true},
-  {id:"drying",    label:"Drying",       icon:"🌡️",  branchHidden:true},
-  {id:"hulling",   label:"Hulling",      icon:"⚙️",  branchHidden:true},
-  {id:"sales",     label:"Sales",        icon:"🏷",   branchHidden:true},
-  {id:"storage",   label:"Party Storage",icon:"🏭",   branchHidden:true},
-  {id:"daybook",   label:"Day Book",     icon:"📓",   branchHidden:true},
-  {id:"ledger",    label:"Ledger",       icon:"📒"},
-  {id:"pl",        label:"Profit & Loss",icon:"📈", adminOnly:true},
-  {id:"trial",     label:"Trial Balance",icon:"⚖️",   branchHidden:true},
-  {id:"outstanding",label:"Outstanding", icon:"📊",   branchHidden:true},
-  {id:"stock",     label:"Stock",        icon:"☕"},
-  {id:"parties",   label:"Parties",      icon:"👥"},
-  {id:"accounts",  label:"Accounts",     icon:"🗂",   branchHidden:true},
-  {id:"opening",   label:"Opening Balance",icon:"🏦", adminOnly:true},
-  {id:"masters",   label:"Masters",      icon:"🗂️", adminOnly:true},
-  {id:"users",     label:"Users",        icon:"👤", adminOnly:true},
+const NAV_GROUPS = [
+  {
+    group: null, // no header for top items
+    items: [
+      {id:"dashboard", label:"Dashboard",      icon:"🏠"},
+    ]
+  },
+  {
+    group: "Transactions",
+    items: [
+      {id:"grn",       label:"Purchase GRN",   icon:"📋"},
+      {id:"yercaud",   label:"Yercaud",         icon:"🌿"},
+      {id:"loadman",   label:"Loadman",         icon:"👷",  branchHidden:true},
+      {id:"lorry",     label:"Lorry Rental",    icon:"🚛",  branchHidden:true},
+      {id:"transfer",  label:"Stock Transfer",  icon:"↔️"},
+      {id:"drying",    label:"Drying",          icon:"🌡️",  branchHidden:true},
+      {id:"hulling",   label:"Hulling",         icon:"⚙️",  branchHidden:true},
+      {id:"sales",     label:"Sales",           icon:"🏷",  branchHidden:true},
+      {id:"storage",   label:"Party Storage",   icon:"🏭",  branchHidden:true},
+    ]
+  },
+  {
+    group: "Reports",
+    items: [
+      {id:"reports",   label:"Reports",         icon:"📊"},
+      {id:"ledger",    label:"Ledger",          icon:"📒"},
+      {id:"stock",     label:"Stock Register",  icon:"☕"},
+    ]
+  },
+  {
+    group: "Masters",
+    items: [
+      {id:"parties",   label:"Parties",         icon:"👥"},
+      {id:"accounts",  label:"Accounts",        icon:"🗂",  branchHidden:true},
+      {id:"masters",   label:"Masters",         icon:"🗂️", adminOnly:true},
+      {id:"users",     label:"Users",           icon:"👤",  adminOnly:true},
+      {id:"opening",   label:"Opening Balance", icon:"🏦",  adminOnly:true},
+    ]
+  },
 ];
+
+// Flat nav for tab rendering (keep all existing tab ids working)
+const NAV = NAV_GROUPS.flatMap(g=>g.items);
 
 export default function App() {
   const [tab, setTab]               = useState("dashboard");
@@ -6120,6 +6272,7 @@ export default function App() {
           isParty:       a.isParty       ?? a.is_party       ?? false,
           isBankAccount: a.isBankAccount ?? a.is_bank_account ?? false,
           accountNo:     a.accountNo     || a.account_no     || "",
+          creditLimit:   parseFloat(a.creditLimit||0),
         };
       });
       setAccounts(accsObj);
@@ -6356,6 +6509,14 @@ export default function App() {
         case "ADD_ACCOUNT": {
           const id = "acc_" + Date.now();
           await db.addAccount({ id, ...action.data, balance:0 });
+          break;
+        }
+
+        case "EDIT_ACCOUNT_LIMIT": {
+          await sb("PATCH","cv_accounts",{
+            body:{ creditLimit: action.creditLimit },
+            q:`?id=eq.${action.id}`
+          });
           break;
         }
 
@@ -7009,11 +7170,34 @@ export default function App() {
           {isBranch&&<div style={{marginTop:6,fontSize:11,background:"#ffffff33",color:"#fff",padding:"2px 8px",borderRadius:10,display:"inline-block",fontWeight:700}}>🌿 {currentUser.branchName||"Yercaud"}</div>}
         </div>
         <nav style={{flex:1,padding:"10px 8px",overflowY:"auto"}}>
-          {visibleNav.map(n=>(
-            <button key={n.id} onClick={()=>{setTab(n.id);document.getElementById("cv-sb").classList.remove("open");document.getElementById("cv-ov").classList.remove("open");}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"9px 14px",borderRadius:8,border:"none",cursor:"pointer",background:tab===n.id?"#ffffff22":"transparent",color:tab===n.id?"#fff":"#ffffff88",fontWeight:tab===n.id?700:500,fontSize:13,fontFamily:"inherit",marginBottom:2,textAlign:"left"}}>
-              <span style={{width:20}}>{n.icon}</span>{n.label}
-            </button>
-          ))}
+          {NAV_GROUPS.map((g,gi)=>{
+            const visible = g.items.filter(n=>{
+              if (n.branchHidden && isBranch) return false;
+              if (n.adminOnly && role!=="admin") return false;
+              return true;
+            });
+            if (visible.length===0) return null;
+            return (
+              <div key={gi} style={{marginBottom:4}}>
+                {g.group&&<div style={{fontSize:9,fontWeight:700,color:"#ffffff55",textTransform:"uppercase",letterSpacing:1.5,padding:"8px 14px 4px"}}>{g.group}</div>}
+                {visible.map(n=>(
+                  <button key={n.id} onClick={()=>{setTab(n.id);document.getElementById("cv-sb").classList.remove("open");document.getElementById("cv-ov").classList.remove("open");}} style={{
+                    display:"flex",alignItems:"center",gap:10,width:"100%",
+                    padding:"8px 14px",borderRadius:8,border:"none",cursor:"pointer",
+                    background:tab===n.id?"#ffffff22":"transparent",
+                    color:tab===n.id?"#fff":"#ffffffaa",
+                    fontWeight:tab===n.id?700:400,
+                    fontSize:13,fontFamily:"inherit",marginBottom:1,textAlign:"left",
+                    transition:"background 0.15s",
+                  }}>
+                    <span style={{width:18,textAlign:"center",fontSize:14}}>{n.icon}</span>
+                    <span>{n.label}</span>
+                    {tab===n.id&&<span style={{marginLeft:"auto",width:4,height:4,borderRadius:"50%",background:"#fff",flexShrink:0}}/>}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </nav>
         <div style={{padding:"10px 16px",borderTop:"1px solid #ffffff22"}}>
           {saving&&<div style={{color:"#fcd34d",fontSize:11,marginBottom:6,textAlign:"center"}}>⏳ Saving...</div>}
@@ -7041,11 +7225,12 @@ export default function App() {
         {tab==="hulling"   && <HullingModule  state={state} dispatch={dispatch} role={role}/>}
         {tab==="sales"     && <SalesModule    state={state} dispatch={dispatch} role={role}/>}
         {tab==="storage"   && <StorageModule  state={state} dispatch={dispatch} role={role}/>}
-        {tab==="daybook"   && <Daybook        state={state} dispatch={dispatch} role={role}/>}
+        {tab==="reports"   && <ReportsHub     state={state} role={role}/>}
         {tab==="ledger"    && <LedgerView     state={state} role={role} currentUser={currentUser}/>}
         {tab==="pl"        && <ProfitLoss     state={state}/>}
         {tab==="trial"     && <TrialBalance   state={state}/>}
         {tab==="outstanding"&& <OutstandingReport state={state}/>}
+        {tab==="daybook"   && <Daybook        state={state} dispatch={dispatch} role={role}/>}
         {tab==="stock"     && <StockView      state={state} dispatch={dispatch} role={role} currentUser={currentUser}/>}
         {tab==="parties"   && <Parties        state={state} dispatch={dispatch}/>}
         {tab==="accounts"  && <AccountsMaster state={state} dispatch={dispatch}/>}
