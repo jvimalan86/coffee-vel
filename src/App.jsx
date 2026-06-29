@@ -823,7 +823,7 @@ function ProfitLoss({ state }) {
     return true;
   }),[state.vouchers,fromDate,toDate]);
 
-  // Compute account balances only from filtered vouchers
+  // Compute account balances from filtered vouchers
   const filteredBalances=useMemo(()=>{
     const balances={};
     Object.values(state.accounts).forEach(a=>{balances[a.id]={...a,balance:0};});
@@ -832,23 +832,60 @@ function ProfitLoss({ state }) {
         if(!balances[e.accountId]) return;
         const acc=balances[e.accountId];
         const dr=parseFloat(e.dr||0),cr=parseFloat(e.cr||0);
-        const delta=["asset","expense"].includes(acc.type)?dr-cr:cr-dr;
-        balances[e.accountId]={...acc,balance:acc.balance+delta};
+        balances[e.accountId]={...acc,balance:acc.balance+(["asset","expense"].includes(acc.type)?dr-cr:cr-dr)};
       });
     });
     return balances;
   },[filteredVouchers,state.accounts]);
 
-  const incomeAccounts=Object.values(filteredBalances).filter(a=>a.type==="income"&&a.balance!==0);
-  const expenseAccounts=Object.values(filteredBalances).filter(a=>a.type==="expense"&&a.balance!==0);
-  const totalIncome=incomeAccounts.reduce((s,a)=>s+a.balance,0);
-  const totalExpense=expenseAccounts.reduce((s,a)=>s+a.balance,0);
-  const netProfit=totalIncome-totalExpense;
+  // Trading account items
+  const purchasesAcc   = filteredBalances["purchases"];
+  const salesAcc       = filteredBalances["sales"];
+  const totalPurchases = purchasesAcc?.balance||0;
+  const totalSales     = salesAcc?.balance||0;
 
-  const SectionRow=({label,value,indent,bold,color})=>(
-    <tr>
-      <td style={{padding:"8px 16px",paddingLeft:indent?32:16,color:color||(bold?C.text:C.text),fontWeight:bold?800:400,fontSize:bold?14:13}}>{label}</td>
-      <td style={{padding:"8px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:bold?800:600,color:color||(bold?C.text:C.muted),fontSize:bold?14:13}}>{fmt(value)}</td>
+  // Closing stock = current stock on hand valued at cost
+  // Sum all stock items: qty × average purchase rate
+  const closingStock = useMemo(()=>{
+    const stockQty = state.stock||{};
+    // Compute weighted average cost per coffee type from GRNs
+    const totCost={}, totQty={};
+    (state.grns||[]).forEach(g=>{
+      if (g.ratePending || !parseFloat(g.purchaseValue||0)) return;
+      const ct = (g.coffeeType||"").trim();
+      const qty = parseFloat(g.dryKg||g.netWeight||0);
+      const val = parseFloat(g.purchaseValue||0);
+      totCost[ct]=(totCost[ct]||0)+val;
+      totQty[ct] =(totQty[ct]||0)+qty;
+    });
+    let total=0;
+    Object.entries(stockQty).forEach(([item,qty])=>{
+      if (qty<=0) return;
+      const avgRate = totQty[item]>0 ? totCost[item]/totQty[item] : 0;
+      total += qty * avgRate;
+    });
+    return total;
+  },[state.stock, state.grns]);
+
+  // Drying, curing and other direct income/expense that are part of trading
+  const directIncomeAccs  = Object.values(filteredBalances).filter(a=>a.type==="income"&&a.id!=="sales"&&a.balance!==0);
+  const directExpenseAccs = Object.values(filteredBalances).filter(a=>a.type==="expense"&&a.id!=="purchases"&&a.balance!==0);
+
+  const totalDirectIncome  = directIncomeAccs.reduce((s,a)=>s+a.balance,0);
+  const totalDirectExpense = directExpenseAccs.reduce((s,a)=>s+a.balance,0);
+
+  // Trading A/c
+  // Dr side: Purchases + Direct Expenses
+  // Cr side: Sales + Closing Stock + Direct Income
+  const grossProfitCr = (totalSales + closingStock + totalDirectIncome) - (totalPurchases + totalDirectExpense);
+
+  // Net Profit = Gross Profit (no separate indirect items yet)
+  const netProfit = grossProfitCr;
+
+  const Row=({label,value,indent,bold,color,dim})=>(
+    <tr style={{background:bold?"#fdf5ee":"transparent"}}>
+      <td style={{padding:"7px 16px",paddingLeft:indent?32:16,color:dim?C.muted:color||C.text,fontWeight:bold?800:400,fontSize:bold?14:13,fontStyle:dim?"italic":"normal"}}>{label}</td>
+      <td style={{padding:"7px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:bold?800:600,color:dim?C.muted:color||C.text,fontSize:bold?14:13}}>{value!==undefined?fmt(Math.abs(value)):"—"}</td>
     </tr>
   );
 
@@ -857,7 +894,7 @@ function ProfitLoss({ state }) {
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
         <div>
           <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📈 Profit & Loss</h2>
-          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Coffee Vel International</p>
+          <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Coffee Vel International · Trading & P&L Account</p>
         </div>
         <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
           <Field label="From Date"><input type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)} style={{...sh.input,width:150}}/></Field>
@@ -869,62 +906,100 @@ function ProfitLoss({ state }) {
       {/* Summary cards */}
       <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
         {[
-          {label:"Total Income",value:totalIncome,color:C.green,icon:"📥"},
-          {label:"Total Expenses",value:totalExpense,color:C.red,icon:"📤"},
-          {label:netProfit>=0?"Net Profit":"Net Loss",value:Math.abs(netProfit),color:netProfit>=0?C.green:C.red,icon:netProfit>=0?"✅":"⚠️"},
+          {label:"Purchases",      value:totalPurchases, color:C.red,   icon:"📋"},
+          {label:"Sales",          value:totalSales,     color:C.blue,  icon:"🏷"},
+          {label:"Closing Stock",  value:closingStock,   color:"#7c3aed",icon:"☕"},
+          {label:netProfit>=0?"Gross Profit":"Gross Loss", value:Math.abs(netProfit), color:netProfit>=0?C.green:C.red, icon:netProfit>=0?"✅":"⚠️"},
         ].map(s=>(
-          <div key={s.label} style={{...sh.card,flex:1,minWidth:180}}>
-            <div style={{fontSize:22,marginBottom:4}}>{s.icon}</div>
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:160}}>
+            <div style={{fontSize:20,marginBottom:4}}>{s.icon}</div>
             <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
-            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:22,color:s.color,marginTop:4}}>{fmt(s.value)}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:20,color:s.color,marginTop:4}}>{fmt(s.value)}</div>
           </div>
         ))}
       </div>
 
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
-        {/* Income */}
+      {/* Trading Account — T-format */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+        {/* Dr side */}
         <div style={{...sh.card,padding:0,overflow:"hidden"}}>
-          <div style={{background:C.green,color:"#fff",padding:"12px 16px",fontWeight:800,fontSize:14}}>📥 Income</div>
+          <div style={{background:C.red,color:"#fff",padding:"10px 16px",fontWeight:800,fontSize:13}}>Dr — Expenses / Purchases</div>
           <table style={{width:"100%",borderCollapse:"collapse"}}>
             <tbody>
-              {incomeAccounts.length===0?(
-                <tr><td colSpan={2} style={{...sh.td,textAlign:"center",color:C.muted,padding:24}}>No income entries</td></tr>
-              ):incomeAccounts.map(a=>(
-                <SectionRow key={a.id} label={a.name} value={a.balance} indent/>
-              ))}
+              <Row label="Purchases" value={totalPurchases} indent bold={false}/>
+              {directExpenseAccs.map(a=><Row key={a.id} label={a.name} value={a.balance} indent/>)}
+              {grossProfitCr>0&&<Row label="Gross Profit c/d" value={grossProfitCr} indent bold color={C.green}/>}
             </tbody>
-            <tfoot><tr style={{background:"#f0fdf4"}}>
-              <td style={{padding:"10px 16px",fontWeight:800,color:C.green}}>Total Income</td>
-              <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmt(totalIncome)}</td>
+            <tfoot><tr style={{background:"#fee2e2"}}>
+              <td style={{padding:"10px 16px",fontWeight:800,color:C.red}}>Total</td>
+              <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>
+                {fmt(totalPurchases + totalDirectExpense + Math.max(0,grossProfitCr))}
+              </td>
             </tr></tfoot>
           </table>
         </div>
 
-        {/* Expenses */}
+        {/* Cr side */}
         <div style={{...sh.card,padding:0,overflow:"hidden"}}>
-          <div style={{background:C.red,color:"#fff",padding:"12px 16px",fontWeight:800,fontSize:14}}>📤 Expenses</div>
+          <div style={{background:C.green,color:"#fff",padding:"10px 16px",fontWeight:800,fontSize:13}}>Cr — Income / Stock</div>
           <table style={{width:"100%",borderCollapse:"collapse"}}>
             <tbody>
-              {expenseAccounts.length===0?(
-                <tr><td colSpan={2} style={{...sh.td,textAlign:"center",color:C.muted,padding:24}}>No expense entries</td></tr>
-              ):expenseAccounts.map(a=>(
-                <SectionRow key={a.id} label={a.name} value={a.balance} indent/>
-              ))}
+              {totalSales>0
+                ? <Row label="Sales" value={totalSales} indent/>
+                : <Row label="Sales" value={0} indent dim/>}
+              <Row label={`Closing Stock (cost)`} value={closingStock} indent color={"#7c3aed"}/>
+              {directIncomeAccs.map(a=><Row key={a.id} label={a.name} value={a.balance} indent/>)}
+              {grossProfitCr<0&&<Row label="Gross Loss c/d" value={Math.abs(grossProfitCr)} indent bold color={C.red}/>}
             </tbody>
-            <tfoot><tr style={{background:"#fff1f2"}}>
-              <td style={{padding:"10px 16px",fontWeight:800,color:C.red}}>Total Expenses</td>
-              <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.red}}>{fmt(totalExpense)}</td>
+            <tfoot><tr style={{background:"#f0fdf4"}}>
+              <td style={{padding:"10px 16px",fontWeight:800,color:C.green}}>Total</td>
+              <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>
+                {fmt(totalSales + closingStock + totalDirectIncome + Math.max(0,-grossProfitCr))}
+              </td>
             </tr></tfoot>
           </table>
         </div>
       </div>
 
+      {/* Closing stock detail */}
+      {closingStock>0&&(
+        <div style={{...sh.card,background:"#faf5ff",border:"1px solid #e9d5ff"}}>
+          <div style={{fontWeight:800,color:"#7c3aed",marginBottom:10,fontSize:13}}>☕ Closing Stock Valuation (at cost)</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            {Object.entries(state.stock||{}).filter(([,q])=>q>0).map(([item,qty])=>{
+              const grnsForItem=(state.grns||[]).filter(g=>{
+                const ct=(g.coffeeType||"").trim();
+                const outType=g.outputType?.trim()||ct;
+                return (ct===item||outType===item)&&!g.ratePending&&parseFloat(g.purchaseValue||0)>0;
+              });
+              const totC=grnsForItem.reduce((s,g)=>s+parseFloat(g.purchaseValue||0),0);
+              const totQ=grnsForItem.reduce((s,g)=>s+parseFloat(g.dryKg||g.netWeight||0),0);
+              const avgRate=totQ>0?totC/totQ:0;
+              const val=qty*avgRate;
+              return(
+                <div key={item} style={{background:"#ede9fe",borderRadius:8,padding:"8px 14px",minWidth:150}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#7c3aed"}}>{item}</div>
+                  <div style={{fontSize:12,color:C.muted,marginTop:2}}>{fmtQ(qty)} kg × ₹{avgRate.toFixed(2)}/kg</div>
+                  <div style={{fontFamily:"monospace",fontWeight:800,color:"#7c3aed",marginTop:4}}>{fmt(val)}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Net result */}
       <div style={{...sh.card,background:netProfit>=0?"#f0fdf4":"#fff1f2",border:`2px solid ${netProfit>=0?C.green:C.red}`}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
           <div>
-            <div style={{fontSize:18,fontWeight:800,color:netProfit>=0?C.green:C.red}}>{netProfit>=0?"✅ Net Profit":"⚠️ Net Loss"}</div>
-            <div style={{fontSize:13,color:C.muted,marginTop:2}}>Income {fmt(totalIncome)} − Expenses {fmt(totalExpense)}</div>
+            <div style={{fontSize:18,fontWeight:800,color:netProfit>=0?C.green:C.red}}>
+              {netProfit>=0?"✅ Gross Profit":"⚠️ Gross Loss"}
+            </div>
+            <div style={{fontSize:12,color:C.muted,marginTop:4}}>
+              Sales {fmt(totalSales)} + Closing Stock {fmt(closingStock)} + Other Income {fmt(totalDirectIncome)}
+              {" − "}Purchases {fmt(totalPurchases)} − Expenses {fmt(totalDirectExpense)}
+            </div>
+            {totalSales===0&&<div style={{fontSize:11,color:"#d97706",marginTop:4,padding:"4px 10px",background:"#fef9c3",borderRadius:6,display:"inline-block"}}>⚠ No sales yet — closing stock credited to show true position</div>}
           </div>
           <div style={{fontFamily:"monospace",fontWeight:800,fontSize:28,color:netProfit>=0?C.green:C.red}}>{fmt(Math.abs(netProfit))}</div>
         </div>
