@@ -3786,24 +3786,35 @@ function MastersModule({ state, dispatch }) {
 // ── DRYING MODULE ─────────────────────────────────────────────────
 function DryingModule({ state, dispatch, role }) {
   const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all"); // all | pending | completed
 
-  // Pull all GRNs that have drying enabled and dry weight entered
+  // Pull ALL GRNs that have drying enabled — both pending (no dryKg) and completed
   const dryingGRNs = useMemo(() =>
     (state.grns||[])
-      .filter(g => (g.hasDrying===true||g.hasDrying==="true"||g.hasDrying===1) && parseFloat(g.dryKg||0)>0)
+      .filter(g => g.hasDrying===true||g.hasDrying==="true"||g.hasDrying===1)
+      .map(g => ({...g, dryingDone: parseFloat(g.dryKg||0)>0}))
       .filter(g => {
+        if (filter==="pending"   && g.dryingDone)  return false;
+        if (filter==="completed" && !g.dryingDone) return false;
         if (!search) return true;
         const s = search.toLowerCase();
         const party = state.parties[g.partyId]?.name||"";
         return g.id.toLowerCase().includes(s) || party.toLowerCase().includes(s) || (g.coffeeType||"").toLowerCase().includes(s);
       })
-      .sort((a,b)=>b.date.localeCompare(a.date))
-  ,[state.grns, state.parties, search]);
+      .sort((a,b)=>{
+        // Pending first, then by date desc
+        if (a.dryingDone!==b.dryingDone) return a.dryingDone?1:-1;
+        return b.date.localeCompare(a.date);
+      })
+  ,[state.grns, state.parties, search, filter]);
 
-  const totalWet   = dryingGRNs.reduce((s,g)=>s+parseFloat(g.netWeight||0),0);
-  const totalDry   = dryingGRNs.reduce((s,g)=>s+parseFloat(g.dryKg||0),0);
-  const totalCharge= dryingGRNs.reduce((s,g)=>s+parseFloat(g.dryingCharge||0),0);
+  const completedGRNs = dryingGRNs.filter(g=>g.dryingDone);
+  const pendingGRNs   = dryingGRNs.filter(g=>!g.dryingDone);
+  const totalWet   = completedGRNs.reduce((s,g)=>s+parseFloat(g.netWeight||0),0);
+  const totalDry   = completedGRNs.reduce((s,g)=>s+parseFloat(g.dryKg||0),0);
+  const totalCharge= completedGRNs.reduce((s,g)=>s+parseFloat(g.dryingCharge||0),0);
   const avgMoisture= totalWet>0 ? ((totalWet-totalDry)/totalWet*100) : 0;
+  const pendingKg  = pendingGRNs.reduce((s,g)=>s+parseFloat(g.netWeight||0),0);
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:20}}>
@@ -3818,37 +3829,48 @@ function DryingModule({ state, dispatch, role }) {
       {/* Summary */}
       <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
         {[
-          {icon:"🌡",label:"Total Jobs",    value:dryingGRNs.length},
+          {icon:"⏳",label:"Pending Drying", value:pendingGRNs.length, sub:fmtQ(pendingKg)+" kg in yard", color:"#d97706"},
+          {icon:"✅",label:"Completed",      value:completedGRNs.length, color:C.green},
           {icon:"💧",label:"Total Wet Wt",  value:fmtQ(totalWet)+" kg"},
           {icon:"☀️",label:"Total Dry Wt",  value:fmtQ(totalDry)+" kg"},
           {icon:"📉",label:"Avg Moisture Loss", value:avgMoisture.toFixed(1)+"%"},
-          {icon:"💰",label:"Total Drying Charges", value:fmt(totalCharge)},
+          {icon:"💰",label:"Drying Charges", value:fmt(totalCharge)},
         ].map(s=>(
-          <div key={s.label} style={{...sh.card,flex:1,minWidth:140}}>
+          <div key={s.label} style={{...sh.card,flex:1,minWidth:130}}>
             <div style={{fontSize:20,marginBottom:4}}>{s.icon}</div>
             <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
-            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:17,color:C.accent,marginTop:4}}>{s.value}</div>
+            <div style={{fontFamily:"monospace",fontWeight:800,fontSize:17,color:s.color||C.accent,marginTop:4}}>{s.value}</div>
+            {s.sub&&<div style={{fontSize:11,color:C.muted,marginTop:1}}>{s.sub}</div>}
           </div>
         ))}
       </div>
 
+      {/* Filter tabs */}
+      <div style={{display:"flex",gap:0,borderBottom:`2px solid ${C.border}`}}>
+        {[["all",`All (${(state.grns||[]).filter(g=>g.hasDrying===true||g.hasDrying==="true"||g.hasDrying===1).length})`],["pending",`⏳ In Drying (${pendingGRNs.length})`],["completed",`✅ Completed (${completedGRNs.length})`]].map(([id,label])=>(
+          <button key={id} onClick={()=>setFilter(id)} style={{padding:"9px 20px",border:"none",borderBottom:`3px solid ${filter===id?C.accent:"transparent"}`,background:"transparent",color:filter===id?C.accent:C.muted,fontWeight:filter===id?700:500,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+        ))}
+      </div>
+
       <div style={{fontSize:12,color:C.muted,padding:"8px 14px",background:"#fff7ed",borderRadius:8,border:"1px solid #fed7aa"}}>
-        💡 To record a new drying result, open the GRN, click "Enter Dry Weight" on the relevant GRN. This register shows all completed drying automatically.
+        💡 To record a drying result, open the GRN module and click "Enter Dry Weight" on the GRN. Pending rows show days elapsed in drying.
       </div>
 
       {/* Register list */}
       {dryingGRNs.length===0?(
         <div style={{...sh.card,textAlign:"center",color:C.muted,padding:48}}>
           <div style={{fontSize:36,marginBottom:8}}>🌡</div>
-          {search?"No matching drying records.":"No drying completed yet. Enter dry weight from the GRN module."}
+          {search?"No matching drying records.":filter==="pending"?"No GRNs currently in drying.":"No drying records yet."}
         </div>
       ):(
         <div style={{...sh.card,padding:0,overflow:"hidden"}}>
           <div style={{overflowX:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",minWidth:760}}>
+            <table style={{width:"100%",borderCollapse:"collapse",minWidth:860}}>
               <thead><tr style={{background:C.cream}}>
                 <th style={sh.th}>GRN</th>
                 <th style={sh.th}>Date</th>
+                <th style={sh.th}>Status</th>
+                <th style={{...sh.th,textAlign:"right"}}>Days in Drying</th>
                 <th style={sh.th}>Party</th>
                 <th style={sh.th}>Type → Output</th>
                 <th style={{...sh.th,textAlign:"right"}}>Wet Wt</th>
@@ -3862,11 +3884,21 @@ function DryingModule({ state, dispatch, role }) {
                   const party = state.parties[g.partyId];
                   const wetWt = parseFloat(g.netWeight||0);
                   const dryWt = parseFloat(g.dryKg||0);
-                  const moisture = wetWt>0 ? ((wetWt-dryWt)/wetWt*100) : 0;
+                  const moisture = wetWt>0&&dryWt>0 ? ((wetWt-dryWt)/wetWt*100) : 0;
+                  // Days in drying: pending = GRN date → today; completed = shown as —
+                  const days = daysDiff(g.date);
                   return(
-                    <tr key={g.id} style={{background:i%2===0?C.surface:C.cream}}>
+                    <tr key={g.id} style={{background:!g.dryingDone?"#fffbeb":i%2===0?C.surface:C.cream}}>
                       <td style={{...sh.td,fontWeight:700,color:C.accent}}>{g.id}</td>
                       <td style={sh.td}>{g.date}</td>
+                      <td style={sh.td}>
+                        {g.dryingDone
+                          ?<span style={{fontSize:11,background:"#dcfce7",color:C.green,padding:"2px 8px",borderRadius:10,fontWeight:700}}>✅ Done</span>
+                          :<span style={{fontSize:11,background:"#fef9c3",color:"#92400e",padding:"2px 8px",borderRadius:10,fontWeight:700}}>⏳ In Drying</span>}
+                      </td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:g.dryingDone?400:800,color:g.dryingDone?C.muted:days>10?C.red:days>5?"#d97706":C.text}}>
+                        {g.dryingDone?"—":`${days} day${days!==1?"s":""}`}
+                      </td>
                       <td style={{...sh.td,fontWeight:600}}>{party?.name||"—"}</td>
                       <td style={sh.td}>
                         <span style={{fontSize:12}}>{g.coffeeType}</span>
@@ -3874,8 +3906,8 @@ function DryingModule({ state, dispatch, role }) {
                         <span style={{fontSize:12,fontWeight:700,color:"#7c3aed"}}>{g.outputType||OUTPUT_MAP[g.coffeeType]||"—"}</span>
                       </td>
                       <td style={{...sh.td,textAlign:"right",fontFamily:"monospace"}}>{fmtQ(wetWt)} kg</td>
-                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:C.green}}>{fmtQ(dryWt)} kg</td>
-                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:moisture>15?C.red:C.muted}}>{moisture.toFixed(1)}%</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:g.dryingDone?C.green:C.muted}}>{g.dryingDone?fmtQ(dryWt)+" kg":"—"}</td>
+                      <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",color:moisture>15?C.red:C.muted}}>{g.dryingDone?moisture.toFixed(1)+"%":"—"}</td>
                       <td style={{...sh.td,textAlign:"right",fontFamily:"monospace",fontWeight:700}}>{g.dryingCharge>0?fmt(g.dryingCharge):"—"}</td>
                       <td style={{...sh.td,fontSize:12,color:C.muted}}>{g.location||"—"}</td>
                     </tr>
@@ -3883,7 +3915,7 @@ function DryingModule({ state, dispatch, role }) {
                 })}
               </tbody>
               <tfoot><tr style={{background:"#fff7ed"}}>
-                <td colSpan={4} style={{padding:"10px 16px",fontWeight:800,color:"#c2410c"}}>Total</td>
+                <td colSpan={6} style={{padding:"10px 16px",fontWeight:800,color:"#c2410c"}}>Total (completed)</td>
                 <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800}}>{fmtQ(totalWet)} kg</td>
                 <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800,color:C.green}}>{fmtQ(totalDry)} kg</td>
                 <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"monospace",fontWeight:800}}>{avgMoisture.toFixed(1)}%</td>
