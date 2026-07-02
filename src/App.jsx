@@ -2348,7 +2348,18 @@ function OrdersModule({ state, dispatch, role }) {
   const GRADE_OPTIONS = ["Grade AAA","Grade AA","Grade A","Grade B","Grade C","Grade PB","Grade BBB","Bits","Grade IDB","Parchment","Dry Cherry"];
 
   const [poForm, setPoForm] = useState({date:today(),partyId:"",coffeeType:"Wet Parchment",qtyKg:"",rate:"",deliveryDate:"",location:"",narration:""});
-  const [soForm, setSoForm] = useState({date:today(),buyerId:"",deliveryDate:"",narration:"",items:[]});
+  const [soForm, setSoForm] = useState({date:today(),buyerId:"",buyerPoNo:"",deliveryDate:"",narration:"",items:[]});
+  const [editPoId, setEditPoId] = useState(null); // PO id being edited
+  const [editSoId, setEditSoId] = useState(null); // SO id being edited
+
+  const startEditPO = (po) => {
+    setPoForm({date:po.date,partyId:po.partyId||"",coffeeType:po.coffeeType||"Wet Parchment",qtyKg:String(po.qtyKg||""),rate:String(po.rate||""),deliveryDate:po.deliveryDate||"",location:po.location||"",narration:po.narration||""});
+    setEditPoId(po.id); setActiveTab("po"); setShowForm(true); setErr("");
+  };
+  const startEditSO = (so) => {
+    setSoForm({date:so.date,buyerId:so.buyerId||"",buyerPoNo:so.buyerPoNo||"",deliveryDate:so.deliveryDate||"",narration:so.narration||"",items:(so.items||[]).map(it=>({grade:it.grade,qtyKg:String(it.qtyKg||""),rate:String(it.rate||""),amount:String(it.amount||"")}))});
+    setEditSoId(so.id); setActiveTab("so"); setShowForm(true); setErr("");
+  };
 
   const poAmount = (parseFloat(poForm.qtyKg)||0)*(parseFloat(poForm.rate)||0);
 
@@ -2356,8 +2367,13 @@ function OrdersModule({ state, dispatch, role }) {
     if (!poForm.partyId) { setErr("Select supplier"); return; }
     if (!parseFloat(poForm.qtyKg)) { setErr("Enter quantity"); return; }
     setErr("");
-    await dispatch({type:"ADD_PO", data:{...poForm, qtyKg:parseFloat(poForm.qtyKg), rate:parseFloat(poForm.rate||0), amount:poAmount}});
-    setShowForm(false);
+    const data = {...poForm, qtyKg:parseFloat(poForm.qtyKg), rate:parseFloat(poForm.rate||0), amount:poAmount};
+    if (editPoId) {
+      await dispatch({type:"EDIT_PO", id:editPoId, data});
+    } else {
+      await dispatch({type:"ADD_PO", data});
+    }
+    setShowForm(false); setEditPoId(null);
     setPoForm({date:today(),partyId:"",coffeeType:"Wet Parchment",qtyKg:"",rate:"",deliveryDate:"",location:"",narration:""});
   };
 
@@ -2378,13 +2394,18 @@ function OrdersModule({ state, dispatch, role }) {
       if (!it.grade||!parseFloat(it.qtyKg)) { setErr("Fill grade and qty for all items"); return; }
     }
     setErr("");
-    await dispatch({type:"ADD_SO", data:{
+    const data = {
       ...soForm,
       items: soForm.items.map(it=>({...it,qtyKg:parseFloat(it.qtyKg),rate:parseFloat(it.rate||0),amount:parseFloat(it.amount||0)})),
       totalAmount: soTotal,
-    }});
-    setShowForm(false);
-    setSoForm({date:today(),buyerId:"",deliveryDate:"",narration:"",items:[]});
+    };
+    if (editSoId) {
+      await dispatch({type:"EDIT_SO", id:editSoId, data});
+    } else {
+      await dispatch({type:"ADD_SO", data});
+    }
+    setShowForm(false); setEditSoId(null);
+    setSoForm({date:today(),buyerId:"",buyerPoNo:"",deliveryDate:"",narration:"",items:[]});
   };
 
   const orderBadge = (st) => {
@@ -2421,7 +2442,7 @@ function OrdersModule({ state, dispatch, role }) {
           <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📑 Orders</h2>
           <p style={{margin:"2px 0 0",color:C.muted,fontSize:13}}>Purchase Orders → GRN · Sales Orders → Sales</p>
         </div>
-        {canPost&&<Btn onClick={()=>{setShowForm(v=>!v);setErr("");}} variant="success" size="lg">{showForm?"✕ Cancel":activeTab==="po"?"+ New Purchase Order":"+ New Sales Order"}</Btn>}
+        {canPost&&<Btn onClick={()=>{setShowForm(v=>!v);setEditPoId(null);setEditSoId(null);setErr("");}} variant="success" size="lg">{showForm?"✕ Cancel":activeTab==="po"?"+ New Purchase Order":"+ New Sales Order"}</Btn>}
       </div>
 
       <div style={{display:"flex",gap:0,borderBottom:`2px solid ${C.border}`}}>
@@ -2433,7 +2454,7 @@ function OrdersModule({ state, dispatch, role }) {
       {activeTab==="po"&&(<>
         {showForm&&(
           <div style={{...sh.card,border:`2px solid ${C.accent}44`}}>
-            <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>📥 New Purchase Order</div>
+            <div style={{fontWeight:800,color:C.accent,marginBottom:14,fontSize:15}}>{editPoId?`✏ Edit ${editPoId}`:"📥 New Purchase Order"}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:12}}>
               <Field label="Date"><input type="date" value={poForm.date} onChange={e=>setPoForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
               <Field label="Supplier *">
@@ -2466,8 +2487,8 @@ function OrdersModule({ state, dispatch, role }) {
             )}
             {err&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:8,background:"#fee2e2",borderRadius:6}}>{err}</div>}
             <div style={{display:"flex",gap:10,marginTop:14}}>
-              <Btn onClick={submitPO} variant="success" size="lg">✓ Create PO</Btn>
-              <Btn onClick={()=>{setShowForm(false);setErr("");}} variant="ghost">Cancel</Btn>
+              <Btn onClick={submitPO} variant="success" size="lg">{editPoId?"✓ Update PO":"✓ Create PO"}</Btn>
+              <Btn onClick={()=>{setShowForm(false);setEditPoId(null);setErr("");}} variant="ghost">Cancel</Btn>
             </div>
           </div>
         )}
@@ -2495,7 +2516,10 @@ function OrdersModule({ state, dispatch, role }) {
                     <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:C.accent}}>{fmtQ(po.qtyKg)} kg{po.rate>0&&<span style={{fontSize:12,color:C.muted}}> @ ₹{po.rate}</span>}</div>
                     {po.amount>0&&<div style={{fontSize:11,color:C.muted}}>{fmt(po.amount)}</div>}
                   </div>
-                  {canPost&&po.status!=="completed"&&po.status!=="cancelled"&&<Btn size="sm" variant="ghost" onClick={()=>setConfirmId({type:"po",id:po.id})}>✕</Btn>}
+                  {canPost&&po.status!=="completed"&&po.status!=="cancelled"&&(<>
+                    <Btn size="sm" variant="outline" onClick={()=>startEditPO(po)}>✏ Edit</Btn>
+                    <Btn size="sm" variant="ghost" onClick={()=>setConfirmId({type:"po",id:po.id})}>✕</Btn>
+                  </>)}
                 </div>
               </div>
               <div style={{marginTop:10}}>
@@ -2519,7 +2543,7 @@ function OrdersModule({ state, dispatch, role }) {
       {activeTab==="so"&&(<>
         {showForm&&(
           <div style={{...sh.card,border:`2px solid ${C.blue}44`}}>
-            <div style={{fontWeight:800,color:C.blue,marginBottom:14,fontSize:15}}>📤 New Sales Order</div>
+            <div style={{fontWeight:800,color:C.blue,marginBottom:14,fontSize:15}}>{editSoId?`✏ Edit ${editSoId}`:"📤 New Sales Order"}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12,marginBottom:12}}>
               <Field label="Date"><input type="date" value={soForm.date} onChange={e=>setSoForm(f=>({...f,date:e.target.value}))} style={sh.input}/></Field>
               <Field label="Buyer *">
@@ -2528,6 +2552,9 @@ function OrdersModule({ state, dispatch, role }) {
                   {buyers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
                   {buyers.length===0&&<option disabled>No customers — add in Parties</option>}
                 </select>
+              </Field>
+              <Field label="Buyer's PO No.">
+                <input value={soForm.buyerPoNo} onChange={e=>setSoForm(f=>({...f,buyerPoNo:e.target.value}))} placeholder="Optional" style={sh.input}/>
               </Field>
               <Field label="Expected Delivery"><input type="date" value={soForm.deliveryDate} onChange={e=>setSoForm(f=>({...f,deliveryDate:e.target.value}))} style={sh.input}/></Field>
               <Field label="Narration"><input value={soForm.narration} onChange={e=>setSoForm(f=>({...f,narration:e.target.value}))} placeholder="Optional" style={sh.input}/></Field>
@@ -2560,8 +2587,8 @@ function OrdersModule({ state, dispatch, role }) {
             </div>
             {err&&<div style={{color:C.red,fontSize:13,fontWeight:600,marginTop:10,padding:8,background:"#fee2e2",borderRadius:6}}>{err}</div>}
             <div style={{display:"flex",gap:10,marginTop:14}}>
-              <Btn onClick={submitSO} variant="primary" size="lg">✓ Create SO</Btn>
-              <Btn onClick={()=>{setShowForm(false);setErr("");}} variant="ghost">Cancel</Btn>
+              <Btn onClick={submitSO} variant="primary" size="lg">{editSoId?"✓ Update SO":"✓ Create SO"}</Btn>
+              <Btn onClick={()=>{setShowForm(false);setEditSoId(null);setErr("");}} variant="ghost">Cancel</Btn>
             </div>
           </div>
         )}
@@ -2582,12 +2609,16 @@ function OrdersModule({ state, dispatch, role }) {
                   <span style={{background:"#dbeafe",color:C.blue,border:"1px solid #bfdbfe",padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:800}}>{so.id}</span>
                   <span style={{fontSize:13,color:C.muted}}>{so.date}</span>
                   <span style={{fontWeight:700}}>{buyer?.name||"—"}</span>
+                  {so.buyerPoNo&&<span style={{fontSize:11,background:"#f3e8ff",color:"#7c3aed",padding:"2px 8px",borderRadius:8,fontWeight:600}}>Buyer PO: {so.buyerPoNo}</span>}
                   {orderBadge(so.status)}
                   {so.deliveryDate&&<span style={{fontSize:11,color:C.muted}}>📅 Due: {so.deliveryDate}</span>}
                 </div>
                 <div style={{display:"flex",gap:10,alignItems:"center"}}>
                   <div style={{fontFamily:"monospace",fontWeight:800,fontSize:16,color:C.blue}}>{fmt(so.totalAmount||0)}</div>
-                  {canPost&&so.status!=="completed"&&so.status!=="cancelled"&&<Btn size="sm" variant="ghost" onClick={()=>setConfirmId({type:"so",id:so.id})}>✕</Btn>}
+                  {canPost&&so.status!=="completed"&&so.status!=="cancelled"&&(<>
+                    <Btn size="sm" variant="outline" onClick={()=>startEditSO(so)}>✏ Edit</Btn>
+                    <Btn size="sm" variant="ghost" onClick={()=>setConfirmId({type:"so",id:so.id})}>✕</Btn>
+                  </>)}
                 </div>
               </div>
               <div style={{marginTop:10,display:"flex",gap:6,flexWrap:"wrap"}}>
@@ -6787,6 +6818,7 @@ export default function App() {
           break;
         }
         case "CANCEL_PO":  await db.updatePO(action.id, {status:"cancelled"}); break;
+        case "EDIT_PO":    await db.updatePO(action.id, action.data); break;
         case "DELETE_PO":  await db.deletePO(action.id); break;
 
         // ── SALES ORDERS ────────────────────────────────────────
@@ -6798,6 +6830,7 @@ export default function App() {
           break;
         }
         case "CANCEL_SO":  await db.updateSO(action.id, {status:"cancelled"}); break;
+        case "EDIT_SO":    await db.updateSO(action.id, action.data); break;
         case "DELETE_SO":  await db.deleteSO(action.id); break;
 
         // ── STOCK TRANSFERS ──────────────────────────────────────
